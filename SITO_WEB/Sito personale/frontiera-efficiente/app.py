@@ -1324,15 +1324,11 @@ def upload_file(contents, filename):
         df      = pd.read_excel(io.BytesIO(decoded))
         cols    = df.columns.tolist()
 
-        # Rileva se è file prezzi (prima colonna = date) o lista ticker
-        _is_price_file = False
-        try:
-            pd.to_datetime(df[cols[0]], errors='raise')
-            _is_price_file = True
-        except Exception:
-            pass
+        # Rileva se è file ticker (colonna 'Ticker' o simile) o file prezzi (prima colonna = date)
+        _TICKER_COLS = {'TICKER','SIMBOLO','SYMBOL','TICKERS','SIMBOLI','CODICE','ISIN'}
+        _is_ticker_file = any(str(c).upper() in _TICKER_COLS for c in cols)
 
-        if _is_price_file:
+        if not _is_ticker_file:
             df_prices = df.set_index(cols[0])
             df_prices.index = pd.to_datetime(df_prices.index)
             df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
@@ -1346,8 +1342,7 @@ def upload_file(contents, filename):
                     True, f'Caricati: {saved_at}', 'user')
 
         # File ticker → avvia thread e mostra overlay con percentuale
-        ticker_col = next((c for c in cols if str(c).upper() in
-                           ('TICKER','SIMBOLO','SYMBOL','TICKERS','SIMBOLI')), cols[0])
+        ticker_col = next((c for c in cols if str(c).upper() in _TICKER_COLS), cols[0])
         tickers = df[ticker_col].dropna().astype(str).str.strip().tolist()
         tickers = [t for t in tickers if t and t.upper() not in ('NAN','')]
         if not tickers:
