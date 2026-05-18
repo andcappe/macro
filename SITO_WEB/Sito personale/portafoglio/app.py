@@ -307,6 +307,37 @@ def _build_ticker_list():
     return list(df[cols[0]]), list(df[cols[1]]), list(df[cols[2]])
 
 
+
+def _clean_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Corregge valori fuori scala ×100 o ÷100 (es. Yahoo Finance che alterna GBp↔GBP/EUR).
+    Per ogni asset:
+    - valori < 2% della mediana → troppo bassi (÷100) → ×100
+    - valori > 50× la mediana  → troppo alti  (×100)  → ÷100
+    Soglie molto conservative: non tocca nulla che non sia inequivocabilmente sbagliato.
+    """
+    df = df.copy()
+    for col in df.columns:
+        s = df[col].dropna()
+        if len(s) < 10:
+            continue
+        med = s.median()
+        if med <= 0:
+            continue
+        # valori troppo bassi (÷100)
+        low_mask = (df[col] > 0) & (df[col] < med * 0.02)
+        if low_mask.any():
+            df.loc[low_mask, col] = df.loc[low_mask, col] * 100
+            print(f"  ⚠ {col}: {low_mask.sum()} valori ×100 (erano < 2% mediana)")
+        # valori troppo alti (×100) — ricalcola mediana dopo eventuale correzione
+        med2 = df[col].dropna().median()
+        high_mask = (df[col] > 0) & (df[col] > med2 * 50)
+        if high_mask.any():
+            df.loc[high_mask, col] = df.loc[high_mask, col] / 100
+            print(f"  ⚠ {col}: {high_mask.sum()} valori ÷100 (erano > 50× mediana)")
+    return df
+
+
 def _do_download(tickers, descrizione, valuta, start_date):
     """Scarica da Yahoo per TARBIUTH: salva su market_data.pkl e aggiorna _DL_BUFFER."""
     global _DL_STATE, _DL_BUFFER
@@ -391,6 +422,7 @@ def _do_download(tickers, descrizione, valuta, start_date):
     original_prices = pd.DataFrame(all_prices)
     original_prices.index = pd.to_datetime(original_prices.index)
     original_prices = original_prices.ffill()
+    original_prices = _clean_prices(original_prices)
     close_returns   = original_prices.pct_change(fill_method=None)
     ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
@@ -495,6 +527,7 @@ def _do_download_client(tickers, descrizione, valuta, start_date):
     original_prices = pd.DataFrame(all_prices)
     original_prices.index = pd.to_datetime(original_prices.index)
     original_prices = original_prices.ffill()
+    original_prices = _clean_prices(original_prices)
     close_returns   = original_prices.pct_change(fill_method=None)
     ticker_map      = {descrizione[i]: tickers[i] for i in range(len(tickers))}
     saved_at        = datetime.now().strftime('%d/%m/%Y %H:%M')
@@ -983,9 +1016,9 @@ app.layout = html.Div([
     # ── Intestazione pagina ───────────────────────────────────────────────────
     html.Div([
         html.H1([
-            'Analisi Rischio di Portafoglio',
+            'Analisi Rischi di Portafoglio',
             html.Span(' - ', style={'color': '#9baabf'}),
-            html.Span('Analisi metriche del rischio', style={
+            html.Span('Analisi delle metriche dei rischi Finanziari', style={
                 'font-size': '1.1rem', 'font-weight': '400', 'color': '#4a5d7a',
             }),
         ], style={
@@ -1045,6 +1078,16 @@ app.layout = html.Div([
                            'background': '#f0f4fb', 'border': '1px solid #c0d0e8',
                            'color': '#1a3a5c', 'margin-right': '8px'}),
         html.Div(id='download-status', style={'font-size': '11px', 'margin-right': '8px'}),
+        html.Button('📂 Importa Frontiera', id='import-frontier-btn', n_clicks=0,
+                    title='Importa i portafogli F1→P1, F2→P2, F3→P3 calcolati nella Frontiera Efficiente',
+                    style={'font-size': '11px', 'padding': '5px 12px',
+                           'border-radius': '4px', 'cursor': 'pointer',
+                           'background': '#eafaf1', 'border': '1px solid #1a7a4a',
+                           'color': '#1a7a4a', 'font-weight': 'bold', 'margin-right': '8px'}),
+        html.Div(id='import-frontier-msg', style={'font-size': '11px', 'color': '#1a7a4a',
+                                                   'font-weight': '600', 'margin-right': '8px'}),
+        dcc.ConfirmDialog(id='import-frontier-confirm',
+                          message='Sei sicuro di voler sovrascrivere i pesi di P1, P2, P3 con quelli della Frontiera Efficiente?'),
         html.Button(id='delete-column-button', n_clicks=0, style={'display': 'none'}),
         html.Div(id='upload-status', style={'display': 'none'}),
     ], style={'display': 'flex', 'align-items': 'center',
@@ -1241,6 +1284,7 @@ def update_output(contents, filename):
                 df_prices = df.set_index(col_names[0])
                 df_prices.index = pd.to_datetime(df_prices.index)
                 df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
+                df_prices = _clean_prices(df_prices)
                 close_returns = df_prices.pct_change(fill_method=None)
                 options    = [{'label': c, 'value': c} for c in df_prices.columns]
                 ticker_map = {c: c for c in df_prices.columns}
@@ -1551,6 +1595,76 @@ def salva_dati(n_clicks, original_prices_data):
         )
     except Exception as e:
         return no_update, html.Div(f'Errore: {e}', style={'color': 'red'}), _MODAL_HIDDEN
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback: importa portafogli dalla Frontiera Efficiente
+# ─────────────────────────────────────────────────────────────────────────────
+_FE_PORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'sessions', 'fe_portfolio.json')
+
+@app.callback(
+    Output('import-frontier-confirm', 'displayed'),
+    Output('import-frontier-msg', 'children'),
+    Input('import-frontier-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def ask_import_frontier(n):
+    if not n:
+        raise PreventUpdate
+    if not os.path.exists(_FE_PORT_FILE):
+        return False, '⚠ Nessun portafoglio salvato dalla Frontiera'
+    try:
+        with open(_FE_PORT_FILE) as f:
+            data = json.load(f)
+        saved_at = data.get('saved_at', '')
+        ports = list(data.get('portfolios', {}).keys())
+        return True, f'Trovato: {", ".join(ports)} del {saved_at}'
+    except Exception as e:
+        return False, f'⚠ Errore lettura: {e}'
+
+
+@app.callback(
+    Output('weights-store-P1', 'data', allow_duplicate=True),
+    Output('weights-store-P2', 'data', allow_duplicate=True),
+    Output('weights-store-P3', 'data', allow_duplicate=True),
+    Output({'type': 'weight-input', 'index': ALL}, 'value', allow_duplicate=True),
+    Output('import-frontier-msg', 'children', allow_duplicate=True),
+    Input('import-frontier-confirm', 'submit_n_clicks'),
+    State({'type': 'weight-input', 'index': ALL}, 'id'),
+    State({'type': 'weight-input', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+def do_import_frontier(submit, all_ids, all_vals):
+    if not submit:
+        raise PreventUpdate
+    try:
+        with open(_FE_PORT_FILE) as f:
+            data = json.load(f)
+        ports = data.get('portfolios', {})
+        w1 = ports.get('F1', {})
+        w2 = ports.get('F2', {})
+        w3 = ports.get('F3', {})
+
+        new_vals = []
+        for inp_id, cur_val in zip(all_ids, all_vals):
+            idx = inp_id['index']  # es. 'P1-Az. ACWI'
+            if idx.startswith('P1-'):
+                asset = idx[3:]
+                new_vals.append(w1.get(asset, 0) if w1 else cur_val)
+            elif idx.startswith('P2-'):
+                asset = idx[3:]
+                new_vals.append(w2.get(asset, 0) if w2 else cur_val)
+            elif idx.startswith('P3-'):
+                asset = idx[3:]
+                new_vals.append(w3.get(asset, 0) if w3 else cur_val)
+            else:
+                new_vals.append(cur_val)
+
+        imported = [k for k in ['F1','F2','F3'] if k in ports]
+        return w1 or no_update, w2 or no_update, w3 or no_update, new_vals, f'✓ Importato: {", ".join(imported)}'
+    except Exception as e:
+        return no_update, no_update, no_update, all_vals, f'⚠ Errore: {e}'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2718,8 +2832,14 @@ def _compute_arima_garch(returns_df, window=250):
     mu_d, sig_d, resid_d = {}, {}, {}
 
     for i, col in enumerate(cols):
-        s = returns_df[col].dropna().tail(window)
-        best_aic, best_mu, best_resid = np.inf, float(s.mean()), (s - s.mean()).values
+        # Conversione a rendimenti logaritmici: più stazionari e normali
+        s_arith = returns_df[col].dropna().tail(window)
+        s = np.log1p(s_arith)  # ln(1 + r_aritm) = rendimento logaritmico giornaliero
+
+        best_aic  = np.inf
+        best_mu   = float(s.mean())
+        best_resid = (s - s.mean()).values
+
         for p in range(3):
             for q in range(3):
                 if p == 0 and q == 0:
@@ -2731,19 +2851,16 @@ def _compute_arima_garch(returns_df, window=250):
                     if m.aic < best_aic:
                         best_aic   = m.aic
                         best_resid = m.resid.values
-                        par   = m.params
-                        ar_c  = [par[k] for k in par.index if k.startswith('ar.')]
-                        denom = 1.0 - sum(ar_c)
-                        if 'const' in par.index and abs(denom) > 0.15:
-                            mu_c = float(par['const'] / denom)
-                            best_mu = mu_c if abs(mu_c) <= 5 * abs(float(s.mean())) + 1e-6 else float(s.mean())
-                        else:
-                            best_mu = float(m.fittedvalues.mean())
+                        # Usa la previsione a 252 passi (come il cono di previsione ARIMA):
+                        # evita l'instabilità di const/(1-sum(AR)) per processi near unit root
+                        fc = m.get_forecast(steps=252).predicted_mean
+                        best_mu = float(fc.mean())
                 except Exception:
                     pass
-        mu_d[col]    = best_mu
+        mu_d[col]    = best_mu   # media logaritmica giornaliera incondizionata
         resid_d[col] = best_resid
 
+        sig_fallback = float(np.std(best_resid)) or float(s.std())
         if _has_arch and len(best_resid) > 20:
             try:
                 with warnings.catch_warnings():
@@ -2752,13 +2869,17 @@ def _compute_arima_garch(returns_df, window=250):
                     gf = gm.fit(disp='off')
                     pr = gf.params
                     o, a, b = pr['omega'], pr['alpha[1]'], pr['beta[1]']
-                    sig_d[col] = (float(np.sqrt(o / (1 - a - b))) / 100
-                                  if a + b < 1.0 else float(np.std(best_resid)))
+                    if a + b < 1.0:
+                        sig_garch = float(np.sqrt(o / (1 - a - b))) / 100
+                        # safeguard: rifiuta stime GARCH fuori range (< 1/10 o > 10x lo std storico)
+                        sig_d[col] = sig_garch if sig_fallback / 10 < sig_garch < sig_fallback * 10 else sig_fallback
+                    else:
+                        sig_d[col] = sig_fallback
             except Exception:
-                sig_d[col] = float(np.std(best_resid))
+                sig_d[col] = sig_fallback
         else:
-            sig_d[col] = float(np.std(best_resid))
-        print(f"  [{i+1}/{len(cols)}] {col}: mu={mu_d[col]:.5f} vol={sig_d[col]:.5f}")
+            sig_d[col] = sig_fallback
+        print(f"  [{i+1}/{len(cols)}] {col}: mu_log={mu_d[col]:.5f} vol_log={sig_d[col]:.5f}")
 
     if not mu_d:
         return None, None
@@ -2771,7 +2892,17 @@ def _compute_arima_garch(returns_df, window=250):
     D       = np.diag(vols)
     cov_d   = D @ corr @ D + 1e-8 * np.eye(len(cols))
 
-    mu_annual  = pd.Series({c: mu_d[c]  * 252        for c in cols})
+    # Correzione di Jensen: converte rendimento log atteso in rendimento aritmetico atteso
+    # E[R_aritm] = exp(mu_log * 252 + 0.5 * sigma_log^2 * 252) - 1
+    def _jensen(mu_log, sig_log, s_arith_fallback):
+        exp_arg = mu_log * 252 + 0.5 * sig_log**2 * 252
+        if not np.isfinite(exp_arg) or exp_arg > 3.0:  # cap a ~1900% — oltre è numericamente rotto
+            return float(s_arith_fallback.mean() * 252)
+        return float(np.exp(exp_arg) - 1)
+
+    mu_annual  = pd.Series(
+        {c: _jensen(mu_d[c], sig_d[c], returns_df[c].dropna().tail(window)) for c in cols}
+    )
     cov_annual = pd.DataFrame(cov_d * 252, index=cols, columns=cols)
     return mu_annual, cov_annual
 
