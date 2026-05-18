@@ -1326,7 +1326,7 @@ def upload_file(contents, filename):
 
         # Rileva se è file ticker (colonna 'Ticker' o simile) o file prezzi (prima colonna = date)
         _TICKER_COLS = {'TICKER','SIMBOLO','SYMBOL','TICKERS','SIMBOLI','CODICE','ISIN'}
-        _is_ticker_file = any(str(c).upper() in _TICKER_COLS for c in cols)
+        _is_ticker_file = any(str(c).strip().upper() in _TICKER_COLS for c in cols)
 
         if not _is_ticker_file:
             df_prices = df.set_index(cols[0])
