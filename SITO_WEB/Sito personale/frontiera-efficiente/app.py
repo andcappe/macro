@@ -1327,22 +1327,32 @@ def upload_file(contents, filename):
         # Rileva se è file ticker (colonna 'Ticker' o simile) o file prezzi (prima colonna = date)
         _TICKER_COLS = {'TICKER','SIMBOLO','SYMBOL','TICKERS','SIMBOLI','CODICE','ISIN'}
         _is_ticker_file = any(str(c).strip().upper() in _TICKER_COLS for c in cols)
+        # Fallback: prima cella della prima colonna non parsabile come data → ticker
+        if not _is_ticker_file:
+            try:
+                pd.to_datetime(str(df.iloc[0, 0]))
+            except Exception:
+                _is_ticker_file = True
 
         if not _is_ticker_file:
-            df_prices = df.set_index(cols[0])
-            df_prices.index = pd.to_datetime(df_prices.index)
-            df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
-            returns_df = df_prices.pct_change(fill_method=None)
-            saved_at   = datetime.now().strftime('%d/%m/%Y %H:%M')
-            _save_user_prices(df_prices, returns_df, saved_at)
-            status_msg = f'✓ {len(df_prices.columns)} asset — prezzi dal file'
-            return (status_msg, no_update, True, _OVERLAY_HIDE,
-                    returns_df.to_json(orient='split', date_format='iso'),
-                    df_prices.to_json(orient='split', date_format='iso'),
-                    True, f'Caricati: {saved_at}', 'user')
+            # File prezzi: prima colonna = date
+            try:
+                df_prices = df.set_index(cols[0])
+                df_prices.index = pd.to_datetime(df_prices.index)
+                df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
+                returns_df = df_prices.pct_change(fill_method=None)
+                saved_at   = datetime.now().strftime('%d/%m/%Y %H:%M')
+                _save_user_prices(df_prices, returns_df, saved_at)
+                status_msg = f'✓ {len(df_prices.columns)} asset — prezzi dal file'
+                return (status_msg, no_update, True, _OVERLAY_HIDE,
+                        returns_df.to_json(orient='split', date_format='iso'),
+                        df_prices.to_json(orient='split', date_format='iso'),
+                        True, f'Caricati: {saved_at}', 'user')
+            except Exception:
+                _is_ticker_file = True  # tratta come ticker se la conversione date fallisce
 
         # File ticker → avvia thread e mostra overlay con percentuale
-        ticker_col = next((c for c in cols if str(c).upper() in _TICKER_COLS), cols[0])
+        ticker_col = next((c for c in cols if str(c).strip().upper() in _TICKER_COLS), cols[0])
         tickers = df[ticker_col].dropna().astype(str).str.strip().tolist()
         tickers = [t for t in tickers if t and t.upper() not in ('NAN','')]
         if not tickers:
