@@ -1490,13 +1490,59 @@ def upload_poll(n_int, req_id):
 def download_template(n):
     if not n:
         raise PreventUpdate
-    df = pd.DataFrame({
-        'Ticker':      ['SPY', 'TLT', 'GLD', 'VEA', 'EEM'],
-        'Descrizione': ['S&P 500 ETF', 'Bond USA 20yr', 'Oro', 'Europa Sviluppata', 'Mercati Emergenti'],
-        'Valuta':      ['USD', 'USD', 'USD', 'USD', 'USD'],
-    })
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Portafoglio'
+
+    headers = ['TICKER', 'DESCRIZIONE', 'VALUTA', 'MERCATO']
+    rows = [
+        ['ISAC.L',  'Az. ACWI',          'USD', 'Azionario ACWI'],
+        ['SWDA.MI', 'Az. World',          'EUR', 'Azionario World'],
+        ['SPY',     'S&P 500 ETF',        'USD', 'Azionario USA'],
+        ['TLT',     'Bond USA 20yr',      'USD', 'Obbligazionario'],
+        ['GLD',     'Oro',                'USD', 'Commodities'],
+        ['VEA',     'Europa Sviluppata',  'USD', 'Azionario Europa'],
+        ['EEM',     'Mercati Emergenti',  'USD', 'Azionario EM'],
+    ]
+
+    hdr_fill  = PatternFill('solid', fgColor='1A3A5C')
+    hdr_font  = Font(bold=True, color='FFFFFF', size=10)
+    hdr_align = Alignment(horizontal='center', vertical='center')
+    thin      = Side(style='thin', color='FFFFFF')
+    hdr_border = Border(left=thin, right=thin, bottom=thin)
+
+    col_widths = [12, 28, 10, 22]
+
+    for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.fill   = hdr_fill
+        cell.font   = hdr_font
+        cell.alignment = hdr_align
+        cell.border = hdr_border
+        ws.column_dimensions[get_column_letter(ci)].width = w
+
+    ws.row_dimensions[1].height = 18
+
+    row_fill_a = PatternFill('solid', fgColor='EEF4FF')
+    row_fill_b = PatternFill('solid', fgColor='FFFFFF')
+    data_font  = Font(size=10)
+    data_align = Alignment(vertical='center')
+
+    for ri, row in enumerate(rows, start=2):
+        fill = row_fill_a if ri % 2 == 0 else row_fill_b
+        for ci, val in enumerate(row, start=1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.fill      = fill
+            cell.font      = data_font
+            cell.alignment = data_align
+        ws.row_dimensions[ri].height = 16
+
     buf = io.BytesIO()
-    df.to_excel(buf, index=False)
+    wb.save(buf)
     buf.seek(0)
     return dcc.send_bytes(buf.read(), 'template_frontiera.xlsx')
 
