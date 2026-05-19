@@ -273,7 +273,7 @@ def _download_one_ticker(ticker):
     return close.rename(ticker)
 
 
-def _download_tickers_thread(req_id, tickers, saved_at):
+def _download_tickers_thread(req_id, tickers, saved_at, descriptions=None, currencies=None):
     import concurrent.futures as _cf
     try:
         with _UPLOAD_LOCK:
@@ -288,14 +288,39 @@ def _download_tickers_thread(req_id, tickers, saved_at):
             try:
                 with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
                     fut = _ex.submit(_download_one_ticker, ticker)
-                    s = fut.result(timeout=20)   # max 20s per ticker
+                    s = fut.result(timeout=20)
                 if s is not None:
                     price_series.append(s)
             except Exception:
                 pass
             with _UPLOAD_LOCK:
                 _UPLOAD_STATE['pct'] = i + 1
+
         df_prices = pd.concat(price_series, axis=1).ffill().dropna(how='all') if price_series else pd.DataFrame()
+
+        # Conversione valuta → EUR
+        if not df_prices.empty and currencies:
+            non_eur = {c for c in currencies.values() if c not in ('EUR', '', 'NAN')}
+            fx = {}
+            for ccy in non_eur:
+                try:
+                    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                        fut = _ex.submit(_download_one_ticker, f'{ccy}EUR=X')
+                        fx_s = fut.result(timeout=15)
+                    if fx_s is not None and not fx_s.empty:
+                        fx[ccy] = fx_s
+                except Exception:
+                    pass
+            for ticker in list(df_prices.columns):
+                ccy = (currencies.get(ticker, 'EUR') or 'EUR').upper()
+                if ccy != 'EUR' and ccy in fx:
+                    rate = fx[ccy].reindex(df_prices.index).ffill().bfill()
+                    df_prices[ticker] = df_prices[ticker] * rate
+
+        # Rinomina colonne ticker → descrizione
+        if descriptions:
+            df_prices = df_prices.rename(columns={t: descriptions.get(t, t) for t in df_prices.columns})
+
         returns_df = df_prices.pct_change(fill_method=None)
         _save_user_prices(df_prices, returns_df, saved_at)
         with _UPLOAD_LOCK:
@@ -1352,12 +1377,28 @@ def upload_file(contents, filename):
                 _is_ticker_file = True  # tratta come ticker se la conversione date fallisce
 
         # File ticker → avvia thread e mostra overlay con percentuale
+        _DESC_COLS = {'DESCRIZIONE','DESCRIPTION','NOME','NAME','DESC','LABEL'}
+        _CURR_COLS = {'VALUTA','CURRENCY','CCY','DIVISA','CURR'}
         ticker_col = next((c for c in cols if str(c).strip().upper() in _TICKER_COLS), cols[0])
+        desc_col   = next((c for c in cols if str(c).strip().upper() in _DESC_COLS), None)
+        curr_col   = next((c for c in cols if str(c).strip().upper() in _CURR_COLS), None)
+
         tickers = df[ticker_col].dropna().astype(str).str.strip().tolist()
         tickers = [t for t in tickers if t and t.upper() not in ('NAN','')]
         if not tickers:
             return ('Nessun ticker trovato nel file', no_update, True, _OVERLAY_HIDE,
                     no_update, no_update, no_update, no_update, no_update)
+
+        descriptions = {}
+        currencies   = {}
+        for _, row in df.iterrows():
+            t = str(row[ticker_col]).strip()
+            if not t or t.upper() in ('NAN', ''):
+                continue
+            if desc_col is not None and pd.notna(row.get(desc_col)):
+                descriptions[t] = str(row[desc_col]).strip() or t
+            if curr_col is not None and pd.notna(row.get(curr_col)):
+                currencies[t] = str(row[curr_col]).strip().upper()
 
         import uuid as _uuid
         req_id   = str(_uuid.uuid4())[:8]
@@ -1367,7 +1408,8 @@ def upload_file(contents, filename):
                                   'pct': 0, 'total': len(tickers), 'error': None,
                                   'prices': None, 'returns': None, 'saved_at': saved_at})
         threading.Thread(target=_download_tickers_thread,
-                         args=(req_id, tickers, saved_at), daemon=True).start()
+                         args=(req_id, tickers, saved_at, descriptions, currencies),
+                         daemon=True).start()
         return ('Scaricamento in corso…', req_id, False, _OVERLAY_SHOW,
                 no_update, no_update, no_update, no_update, no_update)
 
