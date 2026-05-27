@@ -83,6 +83,23 @@ def _reconstruct_from_json(ns):
     except Exception:
         return None, None
 
+def _read_weights_from_json():
+    """Legge i pesi P1/P2/P3 salvati nel portafoglio (current.json)."""
+    p1, p2, p3 = {}, {}, {}
+    try:
+        ns = _read_user_json()
+        for desc, v in ns.items():
+            w1 = float(v.get('P1') or 0)
+            w2 = float(v.get('P2') or 0)
+            w3 = float(v.get('P3') or 0)
+            if w1: p1[desc] = w1
+            if w2: p2[desc] = w2
+            if w3: p3[desc] = w3
+    except Exception:
+        pass
+    return p1, p2, p3
+
+
 def _read_shared_data():
     """Legge prezzi/rendimenti dal portafoglio: JSON utente → buffer live → pkl."""
     try:
@@ -334,11 +351,14 @@ app.layout = html.Div([
     }),
 ])
 
-# ─── Callback 1: Carica dati al primo render ──────────────────────────────────
+# ─── Callback 1: Carica dati e pesi al primo render ──────────────────────────
 @app.callback(
     Output('rend-prices-data', 'data'),
     Output('rend-stock-data', 'data'),
     Output('rend-data-info', 'children'),
+    Output('rend-weights-p1', 'data'),
+    Output('rend-weights-p2', 'data'),
+    Output('rend-weights-p3', 'data'),
     Input('rend-init', 'n_intervals'),
     prevent_initial_call=False,
 )
@@ -348,20 +368,28 @@ def load_default_data(_):
         return None, None, html.Span(
             'Nessun dato disponibile. Vai su Analisi di Portafoglio per caricare i dati.',
             style={'color': '#c0392b'},
-        )
+        ), {}, {}, {}
+    p1, p2, p3 = _read_weights_from_json()
     n_assets = len(prices.columns)
     last_date = prices.index[-1].strftime('%d/%m/%Y') if not prices.empty else 'N/D'
+    has_ports = any([p1, p2, p3])
     info_parts = [
         html.I(className='fa-solid fa-circle-info', style={'marginRight': '6px', 'color': '#1a3a6b'}),
         f'{n_assets} asset · dati al {last_date}',
     ]
     if saved_at:
         info_parts.append(f' · aggiornati il {saved_at}')
+    if has_ports:
+        defined = [f'P{i}' for i, w in enumerate([p1, p2, p3], 1) if w]
+        info_parts.append(html.Span(
+            f' · pesi caricati da Portafoglio ({", ".join(defined)})',
+            style={'color': '#1b5e20', 'fontWeight': '600'},
+        ))
     info_parts.append(html.Span(
-        ' — Seleziona gli asset, configura i pesi P1/P2/P3 e clicca Aggiorna Tabella',
+        ' — seleziona asset/portafogli e clicca Aggiorna Tabella',
         style={'color': '#888'},
     ))
-    return _to_json(prices), _to_json(returns), html.Span(info_parts)
+    return _to_json(prices), _to_json(returns), html.Span(info_parts), p1, p2, p3
 
 
 # ─── Callback 2: Costruisce la griglia asset ──────────────────────────────────
