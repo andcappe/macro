@@ -39,7 +39,12 @@ portafoglio_srv = _load("_app_portafoglio", "portafoglio")
 macro_srv       = _load("_app_macro",       "macro")
 frontiera_srv   = _load("_app_frontiera",   "frontiera-efficiente")
 rendimenti_srv  = _load("_app_rendimenti",  "rendimenti")
-opzioni_srv     = _load("_app_opzioni",     "opzioni")
+
+try:
+    opzioni_srv = _load("_app_opzioni", "opzioni")
+except Exception as _e:
+    print(f"[WARN] opzioni non caricata: {_e}", flush=True)
+    opzioni_srv = None
 
 # ─── Autenticazione ───────────────────────────────────────────────────────────
 from auth import (check_credentials, register_user, register_oauth_user,
@@ -63,8 +68,10 @@ FACEBOOK_APP_SECRET  = os.environ.get('FACEBOOK_APP_SECRET', '')
 ADMIN_EMAIL          = os.environ.get('ADMIN_EMAIL', 'admin@dashboard.local')
 ADMIN_PASSWORD       = os.environ.get('ADMIN_PASSWORD', 'Cambia.Subito.123')
 
-for _srv in (portafoglio_srv, macro_srv, frontiera_srv, rendimenti_srv, opzioni_srv):
+for _srv in (portafoglio_srv, macro_srv, frontiera_srv, rendimenti_srv):
     _srv.secret_key = SECRET_KEY
+if opzioni_srv:
+    opzioni_srv.secret_key = SECRET_KEY
 
 # Percorsi esatti che non richiedono autenticazione
 _PUBLIC_EXACT = {
@@ -898,7 +905,8 @@ _register_auth(portafoglio_srv, add_login_routes=True)
 _register_auth(macro_srv)
 _register_auth(frontiera_srv)
 _register_auth(rendimenti_srv)
-_register_auth(opzioni_srv)
+if opzioni_srv:
+    _register_auth(opzioni_srv)
 
 # ─── Bootstrap admin di default ───────────────────────────────────────────────
 from auth import add_user as _add_user, update_user as _upd_user, list_users as _list_users, get_user as _get_user
@@ -916,7 +924,7 @@ _ROUTES = [
     ("/macro",       macro_srv),
     ("/frontiera",   frontiera_srv),
     ("/rendimenti",  rendimenti_srv),
-    ("/opzioni",     opzioni_srv),
+    *([("/opzioni",  opzioni_srv)] if opzioni_srv else []),
     ("/",            portafoglio_srv),   # catch-all: login, register, home, admin, ecc.
 ]
 
