@@ -193,6 +193,22 @@ def get_cell_style(value, is_portfolio=False):
     return {**base, 'backgroundColor': '#ffebee', 'color': '#b71c1c',
             'fontWeight': 'bold' if is_portfolio else 'normal'}
 
+def compute_akr_last(asset_ret_series, benchmark_ret_series, window, ma_window):
+    """Ultimo valore della rolling IR (AKRatio), opzionalmente lisciato con MA."""
+    try:
+        combined = pd.concat([asset_ret_series, benchmark_ret_series], axis=1).dropna()
+        if len(combined) < window + 1:
+            return None
+        active    = combined.iloc[:, 0] - combined.iloc[:, 1]
+        ir_series = (active.rolling(window).mean() / active.rolling(window).std()) * np.sqrt(252)
+        if ma_window and ma_window > 1:
+            ir_series = ir_series.rolling(int(ma_window), min_periods=1).mean()
+        valid = ir_series.dropna()
+        return float(valid.iloc[-1]) if not valid.empty else None
+    except Exception:
+        return None
+
+
 def calculate_ir_for_period(asset_returns, benchmark_returns, days_back):
     if benchmark_returns is None or len(benchmark_returns) == 0:
         return None
@@ -251,13 +267,16 @@ app.layout = html.Div([
     dcc.Store(id='rend-sort-state', data={}),
     dcc.Store(id='rend-ir-bench-store'),
     dcc.Store(id='rend-rf-store', data=0.0),
+    dcc.Store(id='rend-akr-w-store',      data=30),
+    dcc.Store(id='rend-akr-ma-store',     data=1),
+    dcc.Store(id='rend-akr-filter-store', data='all'),
 
     # Trigger caricamento dati al primo render
     dcc.Interval(id='rend-init', interval=400, max_intervals=1),
 
     html.Div([
 
-        # ── Barra controlli ────────────────────────────────────────────────
+        # ── Barra controlli — riga 1 ───────────────────────────────────────
         html.Div([
             html.H2('Rendimenti Storici per Periodo', style={
                 'fontFamily': 'Inter, sans-serif', 'fontSize': '1.1rem',
@@ -265,34 +284,83 @@ app.layout = html.Div([
                 'margin': '0', 'marginRight': '24px', 'whiteSpace': 'nowrap',
             }),
             html.Div([
-                html.Label('Benchmark IR:', style={
-                    'fontSize': '11px', 'whiteSpace': 'nowrap',
-                    'marginRight': '6px', 'color': '#4a1a7c', 'fontWeight': 'bold',
+                html.Label('Benchmark:', style={
+                    'fontSize': '10px', 'whiteSpace': 'nowrap',
+                    'marginRight': '4px', 'fontWeight': 'bold',
                 }),
                 dcc.Dropdown(id='rend-ir-bench', options=[], value=None,
-                             placeholder='Seleziona benchmark…', clearable=True,
-                             style={'width': '200px', 'fontSize': '11px'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginLeft': '16px'}),
+                             placeholder='Seleziona…', clearable=True,
+                             style={'width': '180px', 'fontSize': '10px',
+                                    'minWidth': '180px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
             html.Div([
-                html.Label('Risk-Free SR (% ann.):', style={
-                    'fontSize': '11px', 'whiteSpace': 'nowrap',
-                    'marginRight': '6px', 'color': '#7a5c00', 'fontWeight': 'bold',
+                html.Label('Risk-Free SR %:', style={
+                    'fontSize': '10px', 'whiteSpace': 'nowrap',
+                    'marginRight': '4px', 'color': '#7a5c00', 'fontWeight': 'bold',
                 }),
                 dcc.Input(id='rend-rf-input', type='number', value=0.0,
                           min=0, max=20, step=0.1, placeholder='es. 3.5',
-                          style={'width': '72px', 'fontSize': '11px',
+                          style={'width': '55px', 'fontSize': '10px',
                                  'border': '1px solid #aaa', 'borderRadius': '3px',
-                                 'padding': '4px 6px'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'marginLeft': '16px'}),
+                                 'padding': '3px 5px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
+            html.Div([
+                html.Label('AK-W:', style={
+                    'fontSize': '10px', 'whiteSpace': 'nowrap',
+                    'marginRight': '4px', 'fontWeight': 'bold',
+                }),
+                dcc.Input(id='rend-akr-w', type='number', value=30, min=5, step=1,
+                          placeholder='30',
+                          style={'width': '45px', 'fontSize': '10px',
+                                 'border': '1px solid #aaa', 'borderRadius': '3px',
+                                 'padding': '3px 5px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
+            html.Div([
+                html.Label('MA:', style={
+                    'fontSize': '10px', 'whiteSpace': 'nowrap',
+                    'marginRight': '4px', 'fontWeight': 'bold',
+                }),
+                dcc.Input(id='rend-akr-ma', type='number', value=1, min=1, step=1,
+                          placeholder='1',
+                          style={'width': '40px', 'fontSize': '10px',
+                                 'border': '1px solid #aaa', 'borderRadius': '3px',
+                                 'padding': '3px 5px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'marginRight': '8px'}),
+            html.Div([
+                html.Label('Filtro AKR:', style={
+                    'fontSize': '9px', 'fontWeight': 'bold', 'color': '#1a3a5c',
+                    'marginRight': '4px', 'whiteSpace': 'nowrap',
+                }),
+                dcc.RadioItems(
+                    id='rend-akr-filter',
+                    options=[
+                        {'label': 'Tutti',  'value': 'all'},
+                        {'label': '>−1',    'value': 'gt_minus1'},
+                        {'label': '>0',     'value': 'gt_0'},
+                    ],
+                    value='all', inline=True,
+                    inputStyle={'marginRight': '2px'},
+                    labelStyle={'marginRight': '6px', 'fontSize': '9px',
+                                'cursor': 'pointer'},
+                ),
+            ], style={
+                'display': 'flex', 'alignItems': 'center',
+                'padding': '2px 6px', 'background': '#f0f4fa',
+                'border': '1px solid #d0d8e8', 'borderRadius': '5px',
+                'marginRight': '8px',
+            }),
             html.Button('Aggiorna Tabella', id='rend-update-btn', n_clicks=0, style={
-                'background': '#0066cc', 'color': 'white', 'border': 'none',
-                'padding': '8px 20px', 'borderRadius': '4px', 'cursor': 'pointer',
-                'fontWeight': 'bold', 'fontSize': '12px', 'marginLeft': 'auto',
+                'background': '#c0392b', 'color': 'white', 'border': 'none',
+                'padding': '4px 14px', 'borderRadius': '4px', 'cursor': 'pointer',
+                'fontWeight': 'bold', 'fontSize': '10px', 'marginLeft': 'auto',
                 'whiteSpace': 'nowrap',
+                'boxShadow': '0 2px 6px rgba(192,57,43,0.4)',
             }),
         ], style={
-            'display': 'flex', 'alignItems': 'center', 'marginBottom': '10px',
-            'flexWrap': 'wrap', 'gap': '8px',
+            'display': 'flex', 'alignItems': 'center', 'marginBottom': '8px',
+            'flexWrap': 'wrap', 'gap': '4px',
+            'padding': '5px 8px', 'background': '#f8fafd',
+            'border': '1px solid #e0e6ef', 'borderRadius': '6px',
         }),
 
         html.Div(id='rend-data-info', style={
@@ -700,6 +768,30 @@ def relay_ir_bench(val):
 def relay_rf(val):
     return val if val is not None else 0.0
 
+@app.callback(
+    Output('rend-akr-w-store', 'data'),
+    Input('rend-akr-w', 'value'),
+    prevent_initial_call=True,
+)
+def relay_akr_w(val):
+    return max(5, int(val)) if val else 30
+
+@app.callback(
+    Output('rend-akr-ma-store', 'data'),
+    Input('rend-akr-ma', 'value'),
+    prevent_initial_call=True,
+)
+def relay_akr_ma(val):
+    return max(1, int(val)) if val else 1
+
+@app.callback(
+    Output('rend-akr-filter-store', 'data'),
+    Input('rend-akr-filter', 'value'),
+    prevent_initial_call=True,
+)
+def relay_akr_filter(val):
+    return val or 'all'
+
 
 # ─── Callback 8: Calcola dati performance ────────────────────────────────────
 @app.callback(
@@ -713,10 +805,13 @@ def relay_rf(val):
     State('rend-weights-p3', 'data'),
     State('rend-ir-bench-store', 'data'),
     State('rend-rf-store', 'data'),
+    State('rend-akr-w-store', 'data'),
+    State('rend-akr-ma-store', 'data'),
     prevent_initial_call=True,
 )
 def compute_performance(n_clicks, selected_items, stock_json, prices_json,
-                        w_p1, w_p2, w_p3, ir_benchmark_name, annual_rf_pct):
+                        w_p1, w_p2, w_p3, ir_benchmark_name, annual_rf_pct,
+                        akr_window, akr_ma):
     if not stock_json or not prices_json or not selected_items:
         raise PreventUpdate
 
@@ -726,6 +821,9 @@ def compute_performance(n_clicks, selected_items, stock_json, prices_json,
     except Exception as e:
         print(f'[rendimenti] compute_performance error: {e}')
         raise PreventUpdate
+
+    akr_window = max(5, int(akr_window or 30))
+    akr_ma     = max(1, int(akr_ma     or 1))
 
     # Costruisce prezzi portafogli
     portfolio_prices  = {}
@@ -753,7 +851,7 @@ def compute_performance(n_clicks, selected_items, stock_json, prices_json,
         portfolio_prices[p_name]  = port_prices
         portfolio_returns[p_name] = port_prices.pct_change().dropna()
 
-    # Benchmark IR
+    # Benchmark (condiviso tra IR-periodi e AKRatio)
     bmark_ret_raw = None
     if ir_benchmark_name:
         if ir_benchmark_name in portfolio_returns:
@@ -782,7 +880,7 @@ def compute_performance(n_clicks, selected_items, stock_json, prices_json,
             prices_series = portfolio_prices.get(item)
             asset_ret_s   = portfolio_returns.get(item)
             if prices_series is None:
-                row = {'name': item, 'is_portfolio': True}
+                row = {'name': item, 'is_portfolio': True, 'AKR': None}
                 for p, _ in all_periods:
                     row[p] = None
                 rows_data.append(row)
@@ -807,6 +905,13 @@ def compute_performance(n_clicks, selected_items, stock_json, prices_json,
 
         row = {'name': item, 'is_portfolio': is_portfolio}
 
+        # AKRatio (rolling IR lisciato con MA, ultimo valore)
+        if bmark_ret_raw is not None and asset_ret_s is not None:
+            row['AKR'] = compute_akr_last(asset_ret_s.dropna(), bmark_ret_raw.dropna(),
+                                          akr_window, akr_ma)
+        else:
+            row['AKR'] = None
+
         for period_name, val in ret_periods:
             if period_name == 'YTD':
                 row[period_name] = calculate_ytd_return(prices_series)
@@ -828,7 +933,13 @@ def compute_performance(n_clicks, selected_items, stock_json, prices_json,
     last_date = (original_prices.index[-1].strftime('%d/%m/%Y')
                  if not original_prices.empty else 'N/D')
 
-    return {'rows': rows_data, 'last_date': last_date}
+    return {
+        'rows': rows_data,
+        'last_date': last_date,
+        'akr_window': akr_window,
+        'akr_ma': akr_ma,
+        'benchmark': ir_benchmark_name or '',
+    }
 
 
 # ─── Callback 9: Aggiorna stato ordinamento ──────────────────────────────────
@@ -859,9 +970,10 @@ def update_sort_state(n_clicks_list, current_sort):
     Output('rend-perf-table', 'children'),
     Input('rend-perf-data', 'data'),
     Input('rend-sort-state', 'data'),
+    State('rend-akr-filter-store', 'data'),
     prevent_initial_call=True,
 )
-def render_table(perf_data, sort_state):
+def render_table(perf_data, sort_state, akr_filter):
     if not perf_data or not perf_data.get('rows'):
         return html.Div(
             'Seleziona gli asset, configura i pesi e clicca "Aggiorna Tabella".',
@@ -869,12 +981,36 @@ def render_table(perf_data, sort_state):
         )
 
     rows_data = perf_data['rows']
-    last_date = perf_data.get('last_date', 'N/D')
+    last_date  = perf_data.get('last_date', 'N/D')
+    akr_window = perf_data.get('akr_window', 30)
+    akr_ma     = perf_data.get('akr_ma', 1)
+    benchmark  = perf_data.get('benchmark', '')
+    akr_filter = akr_filter or 'all'
+
+    # Applica filtro AKR (solo asset, mai portafogli)
+    threshold = None
+    if akr_filter == 'gt_minus1':
+        threshold = -1.0
+    elif akr_filter == 'gt_0':
+        threshold = 0.0
+
+    if threshold is not None:
+        filtered = []
+        for row in rows_data:
+            if row.get('is_portfolio'):
+                filtered.append(row)
+                continue
+            akr_val = row.get('AKR')
+            if akr_val is not None and not (isinstance(akr_val, float) and np.isnan(akr_val)):
+                if akr_val <= threshold:
+                    continue
+            filtered.append(row)
+        rows_data = filtered
 
     ret_cols = ['YTD', '2025', '2024', '2023', 'T-30', 'T-60', 'T-90', 'T-180', 'T-250', 'T-500', 'T-750']
     ir_cols  = ['IR-30', 'IR-60', 'IR-100', 'IR-250']
     sr_cols  = ['SR-30', 'SR-60', 'SR-100', 'SR-250']
-    periods  = ret_cols + ir_cols + sr_cols
+    periods  = ['AKR'] + ret_cols + ir_cols + sr_cols
 
     sort_col = sort_state.get('col') if sort_state else None
     sort_dir = sort_state.get('direction', 'desc') if sort_state else 'desc'
@@ -887,12 +1023,13 @@ def render_table(perf_data, sort_state):
             return val
         rows_data = sorted(rows_data, key=sort_key, reverse=(sort_dir == 'desc'))
 
-    def make_th(label, col_id=None):
+    def make_th(label, col_id=None, bg_override=None):
         is_active = sort_col == col_id if col_id else False
         arrow = (' ▼' if sort_dir == 'desc' else ' ▲') if is_active else (' ↕' if col_id else '')
+        base_bg = bg_override if (bg_override and not is_active) else ('#0d2a4a' if is_active else '#1a3a5c')
         th_style = {
             'padding': '0px',
-            'backgroundColor': '#0d2a4a' if is_active else '#1a3a5c',
+            'backgroundColor': base_bg,
             'color': 'white', 'position': 'sticky', 'top': '0',
             'zIndex': '2', 'minWidth': '90px',
             'border': '1px solid #0d2540', 'whiteSpace': 'nowrap',
@@ -918,18 +1055,14 @@ def render_table(perf_data, sort_state):
         return html.Th(label, style={**th_style, 'padding': '10px 14px'})
 
     header_cells = [make_th('Asset / Portafoglio')]
+    # AKR — prima colonna numerica, sfondo viola come IR
+    header_cells.append(make_th('AKR', col_id='AKR', bg_override='#4a1a7c'))
     for p in ret_cols:
         header_cells.append(make_th(p, col_id=p))
     for p in ir_cols:
-        th = make_th(p, col_id=p)
-        if sort_col != p:
-            th.style['backgroundColor'] = '#4a1a7c'
-        header_cells.append(th)
+        header_cells.append(make_th(p, col_id=p, bg_override='#4a1a7c'))
     for p in sr_cols:
-        th = make_th(p, col_id=p)
-        if sort_col != p:
-            th.style['backgroundColor'] = '#7a5c00'
-        header_cells.append(th)
+        header_cells.append(make_th(p, col_id=p, bg_override='#7a5c00'))
 
     table_rows = [html.Tr(header_cells)]
 
@@ -947,6 +1080,24 @@ def render_table(perf_data, sort_state):
             'border': '1px solid #ddd', 'whiteSpace': 'nowrap', 'minWidth': '160px',
         }
         cells = [html.Td(item, style=name_style)]
+
+        # Cella AKR
+        akr_val = row.get('AKR')
+        if akr_val is None or (isinstance(akr_val, float) and np.isnan(akr_val)):
+            akr_txt = 'N/D'
+            akr_cs  = {'padding': '8px 10px', 'textAlign': 'right', 'fontSize': '12px',
+                       'whiteSpace': 'nowrap', 'border': '1px solid #ddd',
+                       'backgroundColor': '#f3eeff', 'color': '#aaa'}
+        else:
+            akr_txt = f'{akr_val:+.2f}'
+            akr_cs  = {'padding': '8px 10px', 'textAlign': 'right', 'fontSize': '12px',
+                       'whiteSpace': 'nowrap', 'border': '1px solid #ddd',
+                       'fontWeight': 'bold' if is_portfolio else 'normal',
+                       'backgroundColor': '#ede7f6' if akr_val >= 0 else '#fce4ec',
+                       'color': '#4a148c' if akr_val >= 0 else '#880e4f'}
+        if sort_col == 'AKR' and akr_val is not None and not (isinstance(akr_val, float) and np.isnan(akr_val)):
+            akr_cs['backgroundColor'] = '#d1c4e9' if akr_val >= 0 else '#f8bbd0'
+        cells.append(html.Td(akr_txt, style=akr_cs))
 
         for period in ret_cols:
             val = row.get(period)
@@ -998,12 +1149,24 @@ def render_table(perf_data, sort_state):
         'fontFamily': 'Arial, sans-serif',
     })
 
-    info_bar = html.Div([
+    info_parts = [
         html.Span(f'Dati al: {last_date}',
-                  style={'fontSize': '11px', 'color': '#555', 'marginRight': '20px'}),
-        html.Span('Verde = positivo · Rosso = negativo · Clicca intestazione per ordinare',
-                  style={'fontSize': '11px', 'color': '#555'}),
-    ], style={'padding': '8px 12px', 'backgroundColor': '#f0f4fa',
-              'borderBottom': '1px solid #ddd'})
+                  style={'fontSize': '11px', 'color': '#555', 'marginRight': '16px'}),
+    ]
+    if benchmark:
+        info_parts.append(html.Span(
+            f'Benchmark: {benchmark} · AK-W: {akr_window}' + (f' · MA: {akr_ma}' if akr_ma > 1 else ''),
+            style={'fontSize': '11px', 'color': '#4a1a7c', 'fontWeight': '600',
+                   'marginRight': '16px'},
+        ))
+    info_parts.append(html.Span(
+        'Verde = positivo · Rosso = negativo · Clicca intestazione per ordinare',
+        style={'fontSize': '11px', 'color': '#555'},
+    ))
+
+    info_bar = html.Div(info_parts, style={
+        'padding': '8px 12px', 'backgroundColor': '#f0f4fa',
+        'borderBottom': '1px solid #ddd',
+    })
 
     return html.Div([info_bar, table])

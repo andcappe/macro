@@ -37,6 +37,51 @@ app  = Dash(__name__, suppress_callback_exceptions=True, external_stylesheets=_E
             routes_pathname_prefix='/frontiera/')
 app.server.config['MAX_CONTENT_LENGTH'] = 64 * 1024 * 1024
 
+_ROOT_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent
+
+def _get_username():
+    try:
+        from flask import session as _fs
+        return _fs.get('username') or 'anon'
+    except Exception:
+        return 'anon'
+
+def _read_user_json():
+    try:
+        u = _get_username()
+        return json.load(open(_ROOT_DIR / 'sessions' / u / 'current.json'))
+    except Exception:
+        return {}
+
+def _update_user_json_fe(checked=None, weights=None):
+    try:
+        u = _get_username()
+        path = _ROOT_DIR / 'sessions' / u / 'current.json'
+        data = json.load(open(path))
+    except Exception:
+        return
+    changed = False
+    if checked is not None:
+        s = set(checked)
+        for desc in data:
+            v = desc in s
+            if data[desc].get('checked') != v:
+                data[desc]['checked'] = v
+                changed = True
+    if weights is not None:
+        for desc in data:
+            for k in ('P1', 'P2', 'P3'):
+                v = float(weights.get(k, {}).get(desc, 0) or 0)
+                if data[desc].get(k) != v:
+                    data[desc][k] = v
+                    changed = True
+    if changed:
+        try:
+            u = _get_username()
+            json.dump(data, open(_ROOT_DIR / 'sessions' / u / 'current.json', 'w'))
+        except Exception:
+            pass
+
 app.index_string = '''
 <!DOCTYPE html><html>
 <head>{%metas%}<title>Frontiera Efficiente — Andrea Cappelletti</title>{%favicon%}{%css%}
@@ -112,11 +157,6 @@ _ARIMA_STATE = {
 }
 _ARIMA_CACHE_INFO = {'available': False, 'ts': ''}
 
-_UPLOAD_LOCK  = threading.Lock()
-_UPLOAD_STATE = {
-    'req_id': None, 'running': False, 'done': False,
-    'pct': 0, 'total': 0, 'error': None, 'prices': None, 'returns': None, 'saved_at': '',
-}
 
 def _arima_garch_mu_vol(returns_df, window=250, req_id=None):
     """ARIMA(p,0,q) best-AIC + GARCH(1,1) sui residui.
@@ -257,84 +297,6 @@ def _run_arima_thread(req_id, returns_df, window, source='user'):
                 _ARIMA_STATE['done']    = True
                 _ARIMA_STATE['running'] = False
 
-def _download_one_ticker(ticker):
-    import yfinance as _yf
-    raw = _yf.download(ticker, period='10y', auto_adjust=True, progress=False, threads=False)
-    if raw.empty:
-        return None
-    if hasattr(raw.columns, 'levels'):
-        # MultiIndex (yfinance >= 0.2): seleziona Close dal primo livello
-        if 'Close' in raw.columns.get_level_values(0):
-            close = raw['Close'].iloc[:, 0]
-        else:
-            close = raw.iloc[:, 0]
-    else:
-        close = raw['Close'] if 'Close' in raw.columns else raw.iloc[:, 0]
-    return close.rename(ticker)
-
-
-def _download_tickers_thread(req_id, tickers, saved_at, descriptions=None, currencies=None):
-    import concurrent.futures as _cf
-    try:
-        with _UPLOAD_LOCK:
-            _UPLOAD_STATE['total']   = len(tickers)
-            _UPLOAD_STATE['pct']     = 0
-            _UPLOAD_STATE['running'] = True
-        price_series = []
-        for i, ticker in enumerate(tickers):
-            with _UPLOAD_LOCK:
-                if _UPLOAD_STATE['req_id'] != req_id:
-                    return
-            try:
-                with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-                    fut = _ex.submit(_download_one_ticker, ticker)
-                    s = fut.result(timeout=20)
-                if s is not None:
-                    price_series.append(s)
-            except Exception:
-                pass
-            with _UPLOAD_LOCK:
-                _UPLOAD_STATE['pct'] = i + 1
-
-        df_prices = pd.concat(price_series, axis=1).ffill().dropna(how='all') if price_series else pd.DataFrame()
-
-        # Conversione valuta → EUR
-        if not df_prices.empty and currencies:
-            non_eur = {c for c in currencies.values() if c not in ('EUR', '', 'NAN')}
-            fx = {}
-            for ccy in non_eur:
-                try:
-                    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-                        fut = _ex.submit(_download_one_ticker, f'{ccy}EUR=X')
-                        fx_s = fut.result(timeout=15)
-                    if fx_s is not None and not fx_s.empty:
-                        fx[ccy] = fx_s
-                except Exception:
-                    pass
-            for ticker in list(df_prices.columns):
-                ccy = (currencies.get(ticker, 'EUR') or 'EUR').upper()
-                if ccy != 'EUR' and ccy in fx:
-                    rate = fx[ccy].reindex(df_prices.index).ffill().bfill()
-                    df_prices[ticker] = df_prices[ticker] * rate
-
-        # Rinomina colonne ticker → descrizione
-        if descriptions:
-            df_prices = df_prices.rename(columns={t: descriptions.get(t, t) for t in df_prices.columns})
-
-        returns_df = df_prices.pct_change(fill_method=None)
-        _save_user_prices(df_prices, returns_df, saved_at)
-        with _UPLOAD_LOCK:
-            if _UPLOAD_STATE['req_id'] == req_id:
-                _UPLOAD_STATE['prices']  = df_prices
-                _UPLOAD_STATE['returns'] = returns_df
-                _UPLOAD_STATE['done']    = True
-                _UPLOAD_STATE['running'] = False
-    except Exception as e:
-        with _UPLOAD_LOCK:
-            if _UPLOAD_STATE['req_id'] == req_id:
-                _UPLOAD_STATE['error']   = str(e)
-                _UPLOAD_STATE['done']    = True
-                _UPLOAD_STATE['running'] = False
 
 
 def calc_frontier(returns_df, n=20, wmin=0.0, wmax=1.0, rf=0.02, risk='vol', mu_override=None, cov_override=None):
@@ -471,23 +433,28 @@ _PORT_PKL = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     '..', 'portafoglio', 'sessions', 'market_data.pkl',
 ))
+_PORT_SESSIONS = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', 'portafoglio', 'sessions',
+))
+
+_FE_FILES_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / 'Files'
+
+_FE_FILE_ORDER = ['ETF', 'CRIPTO', 'COMMODITIES']
+
+
+
+def _fe_port_cache_path(filename='ETF.xlsx'):
+    """Percorso del pkl di portafoglio corrispondente a filename."""
+    stem = Path(filename).stem
+    if stem == 'ETF':
+        return _PORT_PKL
+    return os.path.join(_PORT_SESSIONS, f'market_data_{stem}.pkl')
 
 _FE_USER_PKL = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'sessions', 'user_data.pkl',
 )
 
-
-def _save_user_prices(prices_df, returns_df, saved_at):
-    try:
-        existing = {}
-        if os.path.exists(_FE_USER_PKL):
-            with open(_FE_USER_PKL, 'rb') as f:
-                existing = pickle.load(f)
-        existing.update({'prices': prices_df, 'returns': returns_df, 'saved_at': saved_at})
-        with open(_FE_USER_PKL, 'wb') as f:
-            pickle.dump(existing, f)
-    except Exception:
-        pass
 
 
 _FE_DEFAULT_ARIMA_PKL = os.path.join(
@@ -553,13 +520,44 @@ def _read_user_data():
     return None, None, '', None
 
 
+def _reconstruct_from_json_fe(ns):
+    """Ricostruisce (prices_df, returns_df) dal JSON utente (source of truth)."""
+    try:
+        first = next(iter(ns.values()))
+        dates = pd.to_datetime(first['dates'])
+        pr, ret = {}, {}
+        for desc, v in ns.items():
+            p = v.get('prices') or []
+            r = v.get('returns') or []
+            if p:
+                pr[desc]  = [float(x) if x is not None else float('nan') for x in p]
+            if r:
+                ret[desc] = [float(x) if x is not None else float('nan') for x in r]
+        op = pd.DataFrame(pr,  index=dates) if pr  else None
+        cr = pd.DataFrame(ret, index=dates) if ret else None
+        return op, cr
+    except Exception:
+        return None, None
+
+
 def _read_shared_data():
     """
     Legge i dati di portafoglio condivisi.
-    1. Buffer live di _app_portafoglio nel processo wsgi (sempre aggiornato).
+    0. JSON utente (source of truth — sempre coerente con lista asset).
+    1. Buffer live di _app_portafoglio nel processo wsgi.
     2. Fallback: market_data.pkl per esecuzione standalone.
     Ritorna (prices_df, returns_df, saved_at) o (None, None, None).
     """
+    # — JSON utente (source of truth) —
+    try:
+        ns = _read_user_json()
+        if ns:
+            op, cr = _reconstruct_from_json_fe(ns)
+            if op is not None and cr is not None:
+                return op, cr, ''
+    except Exception:
+        pass
+
     # — buffer live (wsgi.py carica portafoglio prima di frontiera) —
     try:
         port = sys.modules.get('_app_portafoglio')
@@ -585,6 +583,24 @@ def _read_shared_data():
     except Exception:
         pass
 
+    return None, None, None
+
+
+def _read_arima_from_pkl(pkl_path):
+    """Legge mu/cov ARIMA da un pkl specifico. Restituisce (mu, cov, ts) o (None, None, None)."""
+    try:
+        if os.path.exists(pkl_path):
+            with open(pkl_path, 'rb') as f:
+                data = pickle.load(f)
+            arima = data.get('arima')
+            if arima and isinstance(arima, dict):
+                mu_raw  = arima.get('mu')
+                cov_raw = arima.get('cov')
+                ts      = arima.get('computed_at', '')
+                if mu_raw and cov_raw:
+                    return pd.Series(mu_raw), pd.DataFrame(cov_raw), ts
+    except Exception:
+        pass
     return None, None, None
 
 
@@ -627,8 +643,14 @@ def _read_arima_cache():
     pkl_mu = pkl_cov = pkl_ts = None
     pkl_raw = None
     try:
-        if os.path.exists(_PORT_PKL):
-            with open(_PORT_PKL, 'rb') as f:
+        # Prima cerca nel file ARIMA separato (nuovo formato)
+        _arima_sep = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '..', 'portafoglio', 'sessions', 'market_data_arima.pkl',
+        ))
+        _src = _arima_sep if os.path.exists(_arima_sep) else _PORT_PKL
+        if os.path.exists(_src):
+            with open(_src, 'rb') as f:
                 pkl_data = pickle.load(f)
             pkl_raw = pkl_data.get('arima')
             pkl_mu, pkl_cov, pkl_ts = _parse(pkl_raw)
@@ -730,8 +752,8 @@ def _asset_name_div(asset, short_map):
 
 def _w_cell(w, color):
     if w is None or w < 0.05:
-        return html.Span('—', style={'fontSize':FONT['sm'],'color':'#bbb'})
-    return html.Span(f'{w:.1f}%', style={'fontSize':FONT['sm'],'fontWeight':'700','color': color})
+        return html.Span('—', style={'fontSize':'10px','color':'#bbb'})
+    return html.Span(f'{w:.1f}%', style={'fontSize':'10px','fontWeight':'700','color': color})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: grafico performance cumulativa
@@ -901,7 +923,7 @@ def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_fron
 # ─────────────────────────────────────────────────────────────────────────────
 def _navbar():
     from navbar import make_navbar
-    return make_navbar()
+    return make_navbar(current='frontiera')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout
@@ -912,52 +934,21 @@ app.layout = html.Div([
     html.Div([
         # ── Barra comandi ────────────────────────────────────────────────────
         html.Div([
+            html.Span(id='fe-last-updated',
+                      style={'fontSize':FONT['sm'],'color':'#6b7a99','fontStyle':'italic',
+                             'alignSelf':'center','whiteSpace':'nowrap'}),
             html.Div([
-                html.Span(id='fe-last-updated',
-                          style={'fontSize':FONT['sm'],'color':'#6b7a99','fontStyle':'italic',
-                                 'alignSelf':'center','whiteSpace':'nowrap'}),
-                html.Div([
-                    html.Div('da:',style={'fontSize':FONT['sm'],'marginRight':'4px'}),
-                    dcc.DatePickerSingle(id='fe-date-start',
-                        date=(pd.Timestamp.today()-pd.DateOffset(years=10)).strftime('%Y-%m-%d'),
-                        display_format='DD/MM/YYYY',
-                        style={'fontSize':FONT['sm']}),
-                    html.Div('a:',style={'fontSize':FONT['sm'],'margin':'0 4px'}),
-                    dcc.DatePickerSingle(id='fe-date-end',
-                        date=pd.Timestamp.today().strftime('%Y-%m-%d'),
-                        display_format='DD/MM/YYYY',
-                        style={'fontSize':FONT['sm']}),
-                ], style={'display':'flex','alignItems':'center'}),
-                html.Button('📋 Template', id='fe-btn-template', n_clicks=0,
-                            title='Scarica il template Excel per i tuoi titoli',
-                            style={'fontSize':'11px','padding':'5px 12px','borderRadius':'4px',
-                                   'cursor':'pointer','background':'#e8f5e9',
-                                   'border':'1px solid #a5d6a7','color':'#1b5e20'}),
-                dcc.Upload(id='fe-upload-data',
-                           children=html.Div('Trascina il tuo file'),
-                           style={'width':'150px','height':'32px','lineHeight':'32px',
-                                  'borderWidth':'1px','borderStyle':'dashed','borderRadius':'5px',
-                                  'textAlign':'center','fontSize':'11px',
-                                  'color':'#555','cursor':'pointer'},
-                           multiple=False),
-                html.Button('📥 Scarica', id='fe-btn-scarica', n_clicks=0,
-                            title='Scarica i prezzi correnti come file Excel',
-                            style={'fontSize':'11px','padding':'5px 12px','borderRadius':'4px',
-                                   'cursor':'pointer','background':'#f0f4fb',
-                                   'border':'1px solid #c0d0e8','color':'#1a3a5c'}),
-                dcc.Loading(
-                    id='fe-upload-loading',
-                    custom_spinner=html.Div(style={
-                        'width':'18px','height':'18px',
-                        'border':'3px solid #ccd9ee',
-                        'borderTop':'3px solid #1a3a6b',
-                        'borderRadius':'50%',
-                        'animation':'fe-spin 0.9s linear infinite',
-                    }),
-                    children=html.Div(id='fe-upload-status',
-                                     style={'fontSize':FONT['sm'],'color':'#555',
-                                            'alignSelf':'center'})),
-            ], style={'display':'flex','alignItems':'center','gap':'8px','flexWrap':'wrap'}),
+                html.Div('da:',style={'fontSize':FONT['sm'],'marginRight':'4px'}),
+                dcc.DatePickerSingle(id='fe-date-start',
+                    date=(pd.Timestamp.today()-pd.DateOffset(years=10)).strftime('%Y-%m-%d'),
+                    display_format='DD/MM/YYYY',
+                    style={'fontSize':FONT['sm']}),
+                html.Div('a:',style={'fontSize':FONT['sm'],'margin':'0 4px'}),
+                dcc.DatePickerSingle(id='fe-date-end',
+                    date=pd.Timestamp.today().strftime('%Y-%m-%d'),
+                    display_format='DD/MM/YYYY',
+                    style={'fontSize':FONT['sm']}),
+            ], style={'display':'flex','alignItems':'center'}),
         ], style={'padding':'8px 10px','background':'#f0f4fb',
                   'borderBottom':'1px solid #ccd9ee','display':'flex',
                   'alignItems':'center','flexWrap':'wrap','gap':'8px'}),
@@ -1139,7 +1130,7 @@ app.layout = html.Div([
             }),
         ], style={'display':'flex','alignItems':'flex-start'}),
 
-    ], style={'marginTop':'64px'}),
+    ], style={'marginTop':'106px'}),
 
     # ── Stores ───────────────────────────────────────────────────────────────
     dcc.Store(id='_fe-page-load',    data=1),
@@ -1154,30 +1145,8 @@ app.layout = html.Div([
     dcc.Store(id='fe-selected-pt',     data=None),
     dcc.Store(id='fe-arima-reqid',     data=None),
     dcc.Interval(id='fe-arima-poll',   interval=600, n_intervals=0, disabled=True),
-    dcc.Store(id='fe-upload-reqid',    data=None),
-    dcc.Interval(id='fe-upload-poll',  interval=400, n_intervals=0, disabled=True),
-    dcc.Download(id='fe-dl-template'),
-    dcc.Download(id='fe-dl-prices'),
-
-    # Overlay caricamento dati utente
-    html.Div(id='fe-upload-overlay',
-             style={'display':'none','position':'fixed','top':'0','left':'0',
-                    'width':'100%','height':'100%',
-                    'backgroundColor':'rgba(240,244,251,0.82)',
-                    'zIndex':'9999','alignItems':'center','justifyContent':'center'},
-             children=html.Div([
-                 html.Div(style={
-                     'width':'52px','height':'52px','border':'5px solid #ccd9ee',
-                     'borderTop':'5px solid #1a3a6b','borderRadius':'50%',
-                     'animation':'fe-spin 0.9s linear infinite','margin':'0 auto',
-                 }),
-                 html.P(id='fe-upload-overlay-text', children='Scaricamento dati…',
-                        style={'color':'#1a3a6b','marginTop':'14px','fontSize':'13px',
-                               'fontWeight':'600','fontFamily':'Inter, sans-serif',
-                               'textAlign':'center'}),
-             ], style={'textAlign':'center','padding':'32px 40px','background':'white',
-                       'borderRadius':'12px','boxShadow':'0 4px 24px rgba(26,58,107,0.15)'})),
-
+    dcc.Store(id='fe-sync-sig',        data=''),
+    dcc.Interval(id='fe-live-sync',    interval=2000, n_intervals=0, disabled=False),
 ], style={'minHeight':'100vh'})
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1185,12 +1154,12 @@ app.layout = html.Div([
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.callback(
-    Output('fe-stock-data',   'data',     allow_duplicate=True),
-    Output('fe-prices-data',  'data',     allow_duplicate=True),
-    Output('fe-loaded-flag',  'data',     allow_duplicate=True),
-    Output('fe-last-updated', 'children', allow_duplicate=True),
-    Output('fe-data-source',  'data',     allow_duplicate=True),
-    Input('_fe-page-load',    'data'),
+    Output('fe-stock-data',    'data',     allow_duplicate=True),
+    Output('fe-prices-data',   'data',     allow_duplicate=True),
+    Output('fe-loaded-flag',   'data',     allow_duplicate=True),
+    Output('fe-last-updated',  'children', allow_duplicate=True),
+    Output('fe-data-source',   'data',     allow_duplicate=True),
+    Input('_fe-page-load',     'data'),
     prevent_initial_call='initial_duplicate',
 )
 def on_page_load(_):
@@ -1231,7 +1200,11 @@ def on_page_load(_):
     raise PreventUpdate
 
 
-def _build_grid_rows(returns_df):
+def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
+    pre_select = set(pre_select or [])
+    pre_p1 = (pre_weights or {}).get('P1', {})
+    pre_p2 = (pre_weights or {}).get('P2', {})
+    pre_p3 = (pre_weights or {}).get('P3', {})
     assets    = returns_df.dropna(how='all', axis=1).columns.tolist()
     short_map = _short_history(returns_df)
     rows = []
@@ -1240,36 +1213,37 @@ def _build_grid_rows(returns_df):
             _asset_name_div(asset, short_map),
             html.Div(
                 dcc.Checklist(id={'type':'fe-chart','index':asset},
-                              options=[{'label':'','value':asset}], value=[],
+                              options=[{'label':'','value':asset}],
+                              value=[asset] if asset in pre_select else [],
                               style={'display':'flex','justifyContent':'center'}),
                 style={'width':'7%','display':'flex','justifyContent':'center','alignItems':'center'}
             ),
             html.Div(
                 dcc.Checklist(id={'type':'fe-p1','index':asset},
-                              options=[{'label':'','value':asset}], value=[],
+                              options=[{'label':'','value':asset}], value=[asset] if pre_p1.get(asset, 0) else [],
                               inputStyle={'accentColor':'#0066cc'},
                               style={'display':'flex','justifyContent':'center'}),
                 style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
             ),
             html.Div(
                 dcc.Checklist(id={'type':'fe-p2','index':asset},
-                              options=[{'label':'','value':asset}], value=[],
+                              options=[{'label':'','value':asset}], value=[asset] if pre_p2.get(asset, 0) else [],
                               inputStyle={'accentColor':'#2ca02c'},
                               style={'display':'flex','justifyContent':'center'}),
                 style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
             ),
             html.Div(
                 dcc.Checklist(id={'type':'fe-p3','index':asset},
-                              options=[{'label':'','value':asset}], value=[],
+                              options=[{'label':'','value':asset}], value=[asset] if pre_p3.get(asset, 0) else [],
                               inputStyle={'accentColor':'#e6550d'},
                               style={'display':'flex','justifyContent':'center'}),
                 style={'width':'8%','display':'flex','justifyContent':'center','alignItems':'center'}
             ),
-            html.Div(id={'type':'fe-wgt-f1','index':asset}, children=_w_cell(None,'#0066cc'),
+            html.Div(id={'type':'fe-wgt-f1','index':asset}, children=_w_cell(pre_p1.get(asset),'#0066cc'),
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(id={'type':'fe-wgt-f2','index':asset}, children=_w_cell(None,'#2ca02c'),
+            html.Div(id={'type':'fe-wgt-f2','index':asset}, children=_w_cell(pre_p2.get(asset),'#2ca02c'),
                      style={'width':'15%','display':'flex','alignItems':'center','justifyContent':'center'}),
-            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(None,'#e6550d'),
+            html.Div(id={'type':'fe-wgt-f3','index':asset}, children=_w_cell(pre_p3.get(asset),'#e6550d'),
                      style={'width':'14%','display':'flex','alignItems':'center','justifyContent':'center'}),
         ], style={'display':'flex','alignItems':'center','height':'24px',
                   'borderBottom':'1px solid #f0f4fb',
@@ -1291,7 +1265,15 @@ def build_grid_on_load(loaded, stock_data):
     returns_df = _get_returns(stock_data)
     if returns_df is None or returns_df.empty:
         raise PreventUpdate
-    return _build_grid_rows(returns_df)
+    ns = _read_user_json()
+    pre_select = [d for d, v in ns.items() if v.get('checked')] if ns else []
+    pre_weights = {
+        'P1': {d: v['P1'] for d, v in ns.items() if v.get('P1', 0)},
+        'P2': {d: v['P2'] for d, v in ns.items() if v.get('P2', 0)},
+        'P3': {d: v['P3'] for d, v in ns.items() if v.get('P3', 0)},
+    } if ns else None
+    return _build_grid_rows(returns_df, pre_select=pre_select, pre_weights=pre_weights)
+
 
 
 @app.callback(
@@ -1321,250 +1303,7 @@ def toggle_window_div(risk):
     return win_style, txt, style
 
 
-@app.callback(
-    Output('fe-upload-status',  'children',         allow_duplicate=True),
-    Output('fe-upload-reqid',   'data'),
-    Output('fe-upload-poll',    'disabled'),
-    Output('fe-upload-overlay', 'style'),
-    Output('fe-stock-data',     'data',             allow_duplicate=True),
-    Output('fe-prices-data',    'data',             allow_duplicate=True),
-    Output('fe-loaded-flag',    'data',             allow_duplicate=True),
-    Output('fe-last-updated',   'children',         allow_duplicate=True),
-    Output('fe-data-source',    'data',             allow_duplicate=True),
-    Input('fe-upload-data',     'contents'),
-    State('fe-upload-data',     'filename'),
-    prevent_initial_call=True,
-)
-def upload_file(contents, filename):
-    _OVERLAY_SHOW = {'display':'flex','position':'fixed','top':'0','left':'0',
-                     'width':'100%','height':'100%',
-                     'backgroundColor':'rgba(240,244,251,0.82)',
-                     'zIndex':'9999','alignItems':'center','justifyContent':'center'}
-    _OVERLAY_HIDE = {'display':'none'}
-    if not contents:
-        raise PreventUpdate
-    try:
-        _, cs   = contents.split(',')
-        decoded = base64.b64decode(cs)
-        df      = pd.read_excel(io.BytesIO(decoded))
-        cols    = df.columns.tolist()
 
-        # Rileva se è file ticker (colonna 'Ticker' o simile) o file prezzi (prima colonna = date)
-        _TICKER_COLS = {'TICKER','SIMBOLO','SYMBOL','TICKERS','SIMBOLI','CODICE','ISIN'}
-        _is_ticker_file = any(str(c).strip().upper() in _TICKER_COLS for c in cols)
-        # Fallback: prima cella della prima colonna non parsabile come data → ticker
-        if not _is_ticker_file:
-            try:
-                pd.to_datetime(str(df.iloc[0, 0]))
-            except Exception:
-                _is_ticker_file = True
-
-        if not _is_ticker_file:
-            # File prezzi: prima colonna = date
-            try:
-                df_prices = df.set_index(cols[0])
-                df_prices.index = pd.to_datetime(df_prices.index)
-                df_prices = df_prices.select_dtypes(include='number').ffill().dropna(how='all')
-                returns_df = df_prices.pct_change(fill_method=None)
-                saved_at   = datetime.now().strftime('%d/%m/%Y %H:%M')
-                _save_user_prices(df_prices, returns_df, saved_at)
-                status_msg = f'✓ {len(df_prices.columns)} asset — prezzi dal file'
-                return (status_msg, no_update, True, _OVERLAY_HIDE,
-                        returns_df.to_json(orient='split', date_format='iso'),
-                        df_prices.to_json(orient='split', date_format='iso'),
-                        True, f'Caricati: {saved_at}', 'user')
-            except Exception:
-                _is_ticker_file = True  # tratta come ticker se la conversione date fallisce
-
-        # File ticker → avvia thread e mostra overlay con percentuale
-        _DESC_COLS = {'DESCRIZIONE','DESCRIPTION','NOME','NAME','DESC','LABEL'}
-        _CURR_COLS = {'VALUTA','CURRENCY','CCY','DIVISA','CURR'}
-        ticker_col = next((c for c in cols if str(c).strip().upper() in _TICKER_COLS), cols[0])
-        desc_col   = next((c for c in cols if str(c).strip().upper() in _DESC_COLS), None)
-        curr_col   = next((c for c in cols if str(c).strip().upper() in _CURR_COLS), None)
-
-        tickers = df[ticker_col].dropna().astype(str).str.strip().tolist()
-        tickers = [t for t in tickers if t and t.upper() not in ('NAN','')]
-        if not tickers:
-            return ('Nessun ticker trovato nel file', no_update, True, _OVERLAY_HIDE,
-                    no_update, no_update, no_update, no_update, no_update)
-
-        descriptions = {}
-        currencies   = {}
-        for _, row in df.iterrows():
-            t = str(row[ticker_col]).strip()
-            if not t or t.upper() in ('NAN', ''):
-                continue
-            if desc_col is not None and pd.notna(row.get(desc_col)):
-                descriptions[t] = str(row[desc_col]).strip() or t
-            if curr_col is not None and pd.notna(row.get(curr_col)):
-                currencies[t] = str(row[curr_col]).strip().upper()
-
-        import uuid as _uuid
-        req_id   = str(_uuid.uuid4())[:8]
-        saved_at = datetime.now().strftime('%d/%m/%Y %H:%M')
-        with _UPLOAD_LOCK:
-            _UPLOAD_STATE.update({'req_id': req_id, 'running': True, 'done': False,
-                                  'pct': 0, 'total': len(tickers), 'error': None,
-                                  'prices': None, 'returns': None, 'saved_at': saved_at})
-        threading.Thread(target=_download_tickers_thread,
-                         args=(req_id, tickers, saved_at, descriptions, currencies),
-                         daemon=True).start()
-        return ('Scaricamento in corso…', req_id, False, _OVERLAY_SHOW,
-                no_update, no_update, no_update, no_update, no_update)
-
-    except Exception as e:
-        return (f'Errore: {e}', no_update, True, _OVERLAY_HIDE,
-                no_update, no_update, no_update, no_update, no_update)
-
-
-@app.callback(
-    Output('fe-upload-overlay',      'style',        allow_duplicate=True),
-    Output('fe-upload-overlay-text', 'children'),
-    Output('fe-upload-poll',         'disabled',     allow_duplicate=True),
-    Output('fe-upload-status',       'children',     allow_duplicate=True),
-    Output('fe-last-updated',        'children',     allow_duplicate=True),
-    Output('fe-stock-data',          'data',         allow_duplicate=True),
-    Output('fe-prices-data',         'data',         allow_duplicate=True),
-    Output('fe-loaded-flag',         'data',         allow_duplicate=True),
-    Output('fe-data-source',         'data',         allow_duplicate=True),
-    Output('fe-grid',                'children',     allow_duplicate=True),
-    Output('fe-asset-count',         'children',     allow_duplicate=True),
-    Input('fe-upload-poll',          'n_intervals'),
-    State('fe-upload-reqid',         'data'),
-    prevent_initial_call=True,
-)
-def upload_poll(n_int, req_id):
-    _OVERLAY_HIDE = {'display':'none'}
-    _NU = no_update
-    if not req_id:
-        raise PreventUpdate
-    with _UPLOAD_LOCK:
-        s = dict(_UPLOAD_STATE)
-    if s.get('req_id') != req_id:
-        raise PreventUpdate
-
-    if s.get('error'):
-        return (_OVERLAY_HIDE, '', True, f"Errore: {s['error'][:60]}",
-                '', _NU, _NU, _NU, _NU, _NU, _NU)
-
-    total = s['total'] or 1
-    pct   = s['pct']
-    pct_n = int(pct / total * 100)
-
-    if not s.get('done'):
-        txt = f'Scaricamento dati… {pct}/{total} titoli ({pct_n}%)'
-        _OVERLAY_SHOW = {'display':'flex','position':'fixed','top':'0','left':'0',
-                         'width':'100%','height':'100%',
-                         'backgroundColor':'rgba(240,244,251,0.82)',
-                         'zIndex':'9999','alignItems':'center','justifyContent':'center'}
-        return (_OVERLAY_SHOW, txt, False, _NU, _NU, _NU, _NU, _NU, _NU, _NU, _NU)
-
-    # Download completato
-    df_prices  = s.get('prices')
-    returns_df = s.get('returns')
-    saved_at   = s.get('saved_at', '')
-    if df_prices is None or df_prices.empty or returns_df is None or returns_df.empty:
-        return (_OVERLAY_HIDE, '', True, 'Nessun prezzo scaricato — controlla i ticker',
-                '', _NU, _NU, _NU, _NU, _NU, _NU)
-
-    trovati    = df_prices.columns.tolist()
-    status_msg = f'✓ {len(trovati)} asset scaricati da Yahoo'
-    stock_json  = returns_df.to_json(orient='split', date_format='iso')
-    prices_json = df_prices.to_json(orient='split', date_format='iso')
-
-    try:
-        grid_rows, grid_count = _build_grid_rows(returns_df)
-    except Exception:
-        grid_rows, grid_count = _NU, _NU
-
-    return (_OVERLAY_HIDE, '', True, status_msg, f'Caricati: {saved_at}',
-            stock_json, prices_json, True, 'user', grid_rows, grid_count)
-
-
-@app.callback(
-    Output('fe-dl-template', 'data'),
-    Input('fe-btn-template', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def download_template(n):
-    if not n:
-        raise PreventUpdate
-    from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = 'Portafoglio'
-
-    headers = ['TICKER', 'DESCRIZIONE', 'VALUTA', 'MERCATO']
-    rows = [
-        ['ISAC.L',  'Az. ACWI',          'USD', 'Azionario ACWI'],
-        ['SWDA.MI', 'Az. World',          'EUR', 'Azionario World'],
-        ['SPY',     'S&P 500 ETF',        'USD', 'Azionario USA'],
-        ['TLT',     'Bond USA 20yr',      'USD', 'Obbligazionario'],
-        ['GLD',     'Oro',                'USD', 'Commodities'],
-        ['VEA',     'Europa Sviluppata',  'USD', 'Azionario Europa'],
-        ['EEM',     'Mercati Emergenti',  'USD', 'Azionario EM'],
-    ]
-
-    hdr_fill  = PatternFill('solid', fgColor='1A3A5C')
-    hdr_font  = Font(bold=True, color='FFFFFF', size=10)
-    hdr_align = Alignment(horizontal='center', vertical='center')
-    thin      = Side(style='thin', color='FFFFFF')
-    hdr_border = Border(left=thin, right=thin, bottom=thin)
-
-    col_widths = [12, 28, 10, 22]
-
-    for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
-        cell = ws.cell(row=1, column=ci, value=h)
-        cell.fill   = hdr_fill
-        cell.font   = hdr_font
-        cell.alignment = hdr_align
-        cell.border = hdr_border
-        ws.column_dimensions[get_column_letter(ci)].width = w
-
-    ws.row_dimensions[1].height = 18
-
-    row_fill_a = PatternFill('solid', fgColor='EEF4FF')
-    row_fill_b = PatternFill('solid', fgColor='FFFFFF')
-    data_font  = Font(size=10)
-    data_align = Alignment(vertical='center')
-
-    for ri, row in enumerate(rows, start=2):
-        fill = row_fill_a if ri % 2 == 0 else row_fill_b
-        for ci, val in enumerate(row, start=1):
-            cell = ws.cell(row=ri, column=ci, value=val)
-            cell.fill      = fill
-            cell.font      = data_font
-            cell.alignment = data_align
-        ws.row_dimensions[ri].height = 16
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return dcc.send_bytes(buf.read(), 'template_frontiera.xlsx')
-
-
-@app.callback(
-    Output('fe-dl-prices', 'data'),
-    Input('fe-btn-scarica', 'n_clicks'),
-    State('fe-prices-data', 'data'),
-    prevent_initial_call=True,
-)
-def download_prices(n, prices_data):
-    if not n or not prices_data:
-        raise PreventUpdate
-    try:
-        prices_df = pd.read_json(io.StringIO(prices_data), orient='split')
-        prices_df.index = pd.to_datetime(prices_df.index)
-        buf = io.BytesIO()
-        prices_df.reset_index().to_excel(buf, index=False)
-        buf.seek(0)
-        return dcc.send_bytes(buf.read(), 'prezzi_frontiera.xlsx')
-    except Exception:
-        raise PreventUpdate
 
 
 @app.callback(
@@ -1699,7 +1438,7 @@ def calc_and_render(n, stock_data, prices_data,
             return all_assets if default_all else []
         return sel if len(sel) >= 2 else []
 
-    p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
+    p1_sel = _p_assets(p1_vals, p_ids, default_all=True)
     p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
     p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
 
@@ -1741,7 +1480,10 @@ def calc_and_render(n, stock_data, prices_data,
             else:
                 mu_cached, cov_cached, arima_ts = None, None, None
         else:
-            mu_cached, cov_cached, arima_ts = _read_arima_cache()
+            cache_path = _PORT_PKL
+            mu_cached, cov_cached, arima_ts = _read_arima_from_pkl(cache_path)
+            if mu_cached is None:
+                mu_cached, cov_cached, arima_ts = _read_arima_cache()
         print(f"[calc_and_render] ARIMA cache ({_src}): {'trovata' if mu_cached is not None else 'VUOTA'}")
         if mu_cached is not None:
             # Cache disponibile → inietta nel _ARIMA_STATE e scatta on_arima_done subito
@@ -1753,14 +1495,12 @@ def calc_and_render(n, stock_data, prices_data,
                     'pct': len(all_assets), 'total': len(all_assets),
                     'error': None, 'mu': mu_cached, 'cov': cov_cached,
                 })
-            _prog_style = {'display':'flex','alignItems':'center','justifyContent':'center',
-                           'gap':'10px','padding':'8px 16px','background':'#eef4ff',
-                           'borderRadius':'8px','margin':'4px 0','flexShrink':'0'}
             _nu = no_update
             # Restituisce req_id + ':done' così on_arima_done scatta immediatamente
+            # Clessidra nascosta: la cache è già disponibile, non serve mostrare il progresso
             return (_nu, _nu, _nu, _nu, _nu, _nu,
                     _nu, _nu, _nu, _nu, _nu,
-                    True, req_id + ':done', _prog_style)
+                    True, req_id + ':done', {'display':'none'})
         else:
             # Nessuna cache → calcolo in background
             import uuid as _uuid
@@ -2251,7 +1991,7 @@ def on_arima_done(req_id, stock_data, prices_data,
             return all_assets if default_all else []
         return sel if len(sel) >= 2 else []
 
-    p1_sel = _p_assets(p1_vals, p_ids, default_all=False)
+    p1_sel = _p_assets(p1_vals, p_ids, default_all=True)
     p2_sel = _p_assets(p2_vals, p_ids, default_all=False)
     p3_sel = _p_assets(p3_vals, p_ids, default_all=False)
 
@@ -2591,6 +2331,37 @@ def save_to_portafoglio(n, f1j, f2j, f3j):
         return f'⚠ Errore: {e}'
 
 
+@app.callback(
+    Output('fe-f1-weights', 'data', allow_duplicate=True),
+    Input({'type': 'fe-chart', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+def _fe_sync_checked(chart_vals):
+    selected = [v[0] for v in (chart_vals or []) if v]
+    _update_user_json_fe(checked=selected)
+    return no_update
+
+
+@app.callback(
+    Output('fe-selected-pt', 'data', allow_duplicate=True),
+    Input('fe-f1-weights', 'data'),
+    Input('fe-f2-weights', 'data'),
+    Input('fe-f3-weights', 'data'),
+    prevent_initial_call=True,
+)
+def _fe_sync_weights(f1j, f2j, f3j):
+    weights = {}
+    for k, jdata in (('P1', f1j), ('P2', f2j), ('P3', f3j)):
+        if jdata:
+            try:
+                weights[k] = json.loads(jdata) if isinstance(jdata, str) else jdata
+            except Exception:
+                pass
+    if weights:
+        _update_user_json_fe(weights=weights)
+    return no_update
+
+
 # ── Select-all / deselect-all for P1, P2, P3 ────────────────────────────────
 def _make_selall_cb(btn_id, col_type):
     @app.callback(
@@ -2615,6 +2386,35 @@ _cb_chart = _make_selall_cb('fe-selall-chart', 'fe-chart')
 _cb_p1    = _make_selall_cb('fe-selall-p1',   'fe-p1')
 _cb_p2    = _make_selall_cb('fe-selall-p2',   'fe-p2')
 _cb_p3    = _make_selall_cb('fe-selall-p3',   'fe-p3')
+
+
+@app.callback(
+    Output('fe-stock-data',   'data',     allow_duplicate=True),
+    Output('fe-prices-data',  'data',     allow_duplicate=True),
+    Output('fe-loaded-flag',  'data',     allow_duplicate=True),
+    Output('fe-last-updated', 'children', allow_duplicate=True),
+    Output('fe-data-source',  'data',     allow_duplicate=True),
+    Output('fe-sync-sig',     'data'),
+    Input('fe-live-sync',     'n_intervals'),
+    State('fe-sync-sig',      'data'),
+    prevent_initial_call=True,
+)
+def fe_live_sync(_, sig):
+    ns = _read_user_json()
+    new_sig = ','.join(sorted(ns.keys())) if ns else ''
+    if new_sig == (sig or ''):
+        raise PreventUpdate
+    if not ns:
+        raise PreventUpdate
+    op, cr = _reconstruct_from_json_fe(ns)
+    if op is None or cr is None:
+        raise PreventUpdate
+    return (
+        cr.to_json(orient='split', date_format='iso'),
+        op.to_json(orient='split', date_format='iso'),
+        True, '', 'default', new_sig,
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 server = app.server
