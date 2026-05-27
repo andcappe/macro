@@ -554,9 +554,9 @@ def collect_selected(all_values):
 
 # ─── Callback 4: Aggiorna pesi ────────────────────────────────────────────────
 @app.callback(
-    Output('rend-weights-p1', 'data'),
-    Output('rend-weights-p2', 'data'),
-    Output('rend-weights-p3', 'data'),
+    Output('rend-weights-p1', 'data', allow_duplicate=True),
+    Output('rend-weights-p2', 'data', allow_duplicate=True),
+    Output('rend-weights-p3', 'data', allow_duplicate=True),
     Input({'type': 'rend-weight', 'index': ALL}, 'value'),
     State({'type': 'rend-weight', 'index': ALL}, 'id'),
     State('rend-weights-p1', 'data'),
