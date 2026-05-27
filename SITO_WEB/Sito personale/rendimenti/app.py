@@ -437,33 +437,47 @@ def build_asset_grid(stock_json, selected, p1, p2, p3):
                    'padding': '4px 8px', 'marginBottom': '6px'},
         )
 
+    def _col_header(label, btn_id, color, tip):
+        return html.Div([
+            html.Span(label, style={
+                'fontSize': '9px', 'fontWeight': 'bold', 'color': color,
+                'lineHeight': '1', 'fontFamily': 'Inter, sans-serif',
+            }),
+            html.Button('☑', id=btn_id, n_clicks=0, title=tip, style={
+                'fontSize': '7px', 'border': 'none', 'background': 'none',
+                'cursor': 'pointer', 'color': color,
+                'padding': '0', 'margin': '0', 'lineHeight': '1',
+            }),
+        ], style={
+            'display': 'flex', 'flexDirection': 'column',
+            'alignItems': 'center', 'justifyContent': 'center',
+            'overflow': 'hidden', 'gap': '0px',
+        })
+
     header = html.Div([
-        html.Div('Asset', style={'width': '35%', 'fontWeight': 'bold',
-                                  'paddingLeft': '5px', 'fontSize': '10px'}),
-        html.Div(
-            html.Button('Deseleziona', id='rend-deselect-btn', n_clicks=0,
-                        style={'fontSize': '8px', 'padding': '2px 4px', 'width': '95%'}),
-            style={'width': '10%', 'textAlign': 'center'},
-        ),
-        html.Div('P1', style={'width': '15%', 'textAlign': 'center',
-                               'fontWeight': 'bold', 'fontSize': '10px'}),
-        html.Div('P2', style={'width': '15%', 'textAlign': 'center',
-                               'fontWeight': 'bold', 'fontSize': '10px'}),
-        html.Div('P3', style={'width': '15%', 'textAlign': 'center',
-                               'fontWeight': 'bold', 'fontSize': '10px'}),
-    ], style={'display': 'flex', 'marginBottom': '4px',
-              'borderBottom': '2px solid #ccc', 'paddingBottom': '4px'})
+        html.Div('Asset', style={
+            'width': '35%', 'fontWeight': 'bold', 'paddingLeft': '5px',
+            'fontSize': '9px', 'fontFamily': 'Inter, sans-serif',
+        }),
+        html.Div(_col_header('CH', 'rend-deselect-btn', '#1a3a5c', 'Seleziona / Deseleziona'),
+                 style={'width': '10%', 'display': 'flex', 'alignItems': 'center',
+                        'justifyContent': 'center'}),
+        html.Div(_col_header('P1', 'rend-reset-p1-btn', '#e6194b', 'Azzera pesi P1'),
+                 style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
+                        'justifyContent': 'center'}),
+        html.Div(_col_header('P2', 'rend-reset-p2-btn', '#3cb44b', 'Azzera pesi P2'),
+                 style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
+                        'justifyContent': 'center'}),
+        html.Div(_col_header('P3', 'rend-reset-p3-btn', '#4363d8', 'Azzera pesi P3'),
+                 style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
+                        'justifyContent': 'center'}),
+    ], style={
+        'display': 'flex', 'alignItems': 'center', 'minHeight': '18px',
+        'background': '#eaf4fb', 'borderTop': '2px solid #2e6da4',
+        'borderBottom': '1px solid #aed6f1', 'padding': '2px 0',
+    })
 
-    sub_header = html.Div([
-        html.Div('', style={'width': '35%'}),
-        html.Div('Sel', style={'width': '10%', 'textAlign': 'center',
-                                'fontWeight': 'bold', 'fontSize': '9px'}),
-        html.Div('%', style={'width': '15%', 'textAlign': 'center', 'fontSize': '9px'}),
-        html.Div('%', style={'width': '15%', 'textAlign': 'center', 'fontSize': '9px'}),
-        html.Div('%', style={'width': '15%', 'textAlign': 'center', 'fontSize': '9px'}),
-    ], style={'display': 'flex', 'marginBottom': '3px', 'borderBottom': '1px solid #eee'})
-
-    rows = [badge, header, sub_header]
+    rows = [badge, header]
 
     for asset in asset_names:
         asset_val = [asset] if asset in selected else []
@@ -473,35 +487,45 @@ def build_asset_grid(stock_json, selected, p1, p2, p3):
             return dcc.Input(
                 id={'type': 'rend-weight', 'index': f'P{p_idx}-{a}'},
                 type='number', value=val, min=0, max=100, step=0.1, placeholder='0',
-                style={'width': '90%', 'textAlign': 'right', 'fontSize': '9px',
-                       'marginBottom': '2px'},
+                style={'width': '90%', 'textAlign': 'right', 'fontSize': '8px',
+                       'height': '18px', 'padding': '1px 2px', 'boxSizing': 'border-box'},
             )
 
         row = html.Div([
-            html.Div(html.B(asset), style={
-                'width': '35%', 'height': '28px', 'display': 'flex',
-                'alignItems': 'center', 'paddingLeft': '5px',
-                'fontSize': '10px', 'overflow': 'hidden', 'whiteSpace': 'nowrap',
-            }),
+            html.Div(
+                html.Span(asset, style={
+                    'color': '#1a3a5c', 'fontWeight': 'bold',
+                    'overflow': 'hidden', 'whiteSpace': 'nowrap',
+                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+                    'fontFamily': 'Inter, sans-serif',
+                }),
+                style={'width': '35%', 'height': '22px', 'display': 'flex',
+                       'alignItems': 'center', 'paddingLeft': '4px', 'overflow': 'hidden'},
+            ),
             html.Div(
                 dcc.Checklist(
                     id={'type': 'rend-check', 'index': asset},
                     options=[{'label': '', 'value': asset}],
                     value=asset_val,
-                    style={'fontSize': '10px', 'justifyContent': 'center'},
+                    inputStyle={'width': '10px', 'height': '10px',
+                                'cursor': 'pointer', 'margin': '0'},
+                    style={'display': 'flex', 'justifyContent': 'center',
+                           'alignItems': 'center', 'width': '100%'},
                 ),
-                style={'width': '10%', 'height': '28px', 'display': 'flex',
+                style={'width': '10%', 'height': '22px', 'display': 'flex',
                        'alignItems': 'center', 'justifyContent': 'center'},
             ),
             html.Div(make_weight(1), style={'width': '15%'}),
             html.Div(make_weight(2), style={'width': '15%'}),
             html.Div(make_weight(3), style={'width': '15%'}),
-        ], style={'display': 'flex', 'borderBottom': '1px dotted #eee'})
+        ], style={'display': 'flex', 'alignItems': 'center',
+                  'borderBottom': '1px dotted #eee'})
         rows.append(row)
 
     # Righe portafogli (read-only, mostra totale pesi)
     for p_num in [1, 2, 3]:
-        p_name = f'Port{p_num}'
+        p_name  = f'Port{p_num}'
+        p_color = {1: '#e6194b', 2: '#3cb44b', 3: '#4363d8'}[p_num]
         port_val = [p_name] if p_name in selected else []
         w_dict = {1: p1, 2: p2, 3: p3}[p_num]
         total_w = sum(v for v in w_dict.values() if v and v > 0) if w_dict else 0
@@ -509,28 +533,37 @@ def build_asset_grid(stock_json, selected, p1, p2, p3):
         t_label = f'{total_w:.0f}%'
 
         port_row = html.Div([
-            html.Div(html.B(p_name, style={'color': '#0066cc'}), style={
-                'width': '35%', 'height': '28px', 'display': 'flex',
-                'alignItems': 'center', 'paddingLeft': '5px', 'fontSize': '10px',
-            }),
+            html.Div(
+                html.Span(p_name, style={
+                    'color': p_color, 'fontWeight': 'bold',
+                    'overflow': 'hidden', 'whiteSpace': 'nowrap',
+                    'textOverflow': 'ellipsis', 'maxWidth': '100%', 'fontSize': '9px',
+                    'fontFamily': 'Inter, sans-serif',
+                }),
+                style={'width': '35%', 'height': '22px', 'display': 'flex',
+                       'alignItems': 'center', 'paddingLeft': '4px', 'overflow': 'hidden'},
+            ),
             html.Div(
                 dcc.Checklist(
                     id={'type': 'rend-check', 'index': p_name},
                     options=[{'label': '', 'value': p_name}],
                     value=port_val,
-                    style={'fontSize': '10px', 'justifyContent': 'center'},
+                    inputStyle={'width': '10px', 'height': '10px',
+                                'cursor': 'pointer', 'margin': '0'},
+                    style={'display': 'flex', 'justifyContent': 'center',
+                           'alignItems': 'center', 'width': '100%'},
                 ),
-                style={'width': '10%', 'height': '28px', 'display': 'flex',
+                style={'width': '10%', 'height': '22px', 'display': 'flex',
                        'alignItems': 'center', 'justifyContent': 'center'},
             ),
             html.Div(html.Span(t_label, style={'color': t_color, 'fontWeight': 'bold',
-                                               'fontSize': '10px'}),
+                                               'fontSize': '9px'}),
                      style={'width': '15%', 'display': 'flex', 'alignItems': 'center',
                             'justifyContent': 'center'}),
             html.Div('', style={'width': '15%'}),
             html.Div('', style={'width': '15%'}),
-        ], style={'display': 'flex', 'borderBottom': '1px dotted #eee',
-                  'backgroundColor': '#eef4ff'})
+        ], style={'display': 'flex', 'alignItems': 'center',
+                  'borderBottom': '1px dotted #eee', 'backgroundColor': '#eef4ff'})
         rows.append(port_row)
 
     # Opzioni benchmark: asset + portafogli configurati
@@ -622,6 +655,32 @@ def toggle_all_checks(n, current_values, all_options):
     if any(v for v in current_values):
         return [[] for _ in all_options], 'Seleziona'
     return [[opts[0]['value']] if opts else [] for opts in all_options], 'Deseleziona'
+
+
+# ─── Callback 6b: Reset pesi P1 / P2 / P3 ───────────────────────────────────
+@app.callback(
+    Output('rend-weights-p1', 'data', allow_duplicate=True),
+    Input('rend-reset-p1-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def reset_p1(_):
+    return {}
+
+@app.callback(
+    Output('rend-weights-p2', 'data', allow_duplicate=True),
+    Input('rend-reset-p2-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def reset_p2(_):
+    return {}
+
+@app.callback(
+    Output('rend-weights-p3', 'data', allow_duplicate=True),
+    Input('rend-reset-p3-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def reset_p3(_):
+    return {}
 
 
 # ─── Callback 7: Relay stores IR e RF ────────────────────────────────────────
