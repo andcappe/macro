@@ -19,6 +19,180 @@ from dash.exceptions import PreventUpdate
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+try:
+    import nest_asyncio as _nest
+    _nest.apply()
+    from ib_insync import IB, Stock, Option, util as ib_util
+    _IB_AVAILABLE = True
+except ImportError:
+    _IB_AVAILABLE = False
+
+
+# ─── IBKR helpers ────────────────────────────────────────────────────────────
+
+def _ib_connect(port=7497):
+    """Apre connessione TWS/Gateway. Ritorna IB o None se TWS non disponibile."""
+    if not _IB_AVAILABLE:
+        return None
+    try:
+        ib = IB()
+        ib.connect('127.0.0.1', port, clientId=15, timeout=4, readonly=True)
+        return ib if ib.isConnected() else None
+    except Exception:
+        return None
+
+
+def _ib_get_spot_hist_exps(ticker_sym, port=7497):
+    """
+    Spot price + 1Y daily bars + lista scadenze da TWS.
+    Ritorna dict {spot, name, hist_df, expirations} o None.
+    """
+    ib = _ib_connect(port)
+    if not ib:
+        return None
+    try:
+        contract = Stock(ticker_sym, 'SMART', 'USD')
+        ib.qualifyContracts(contract)
+        name = getattr(contract, 'longName', None) or ticker_sym
+
+        # Spot via snapshot
+        md = ib.reqMktData(contract, '', False, False)
+        ib.sleep(1.5)
+        spot = None
+        for attr in ('last', 'close', 'bid', 'ask'):
+            v = getattr(md, attr, None)
+            if v and float(v) > 0:
+                spot = float(v)
+                break
+        try:
+            ib.cancelMktData(contract)
+        except Exception:
+            pass
+        if not spot:
+            return None
+
+        # Historical bars (1 anno daily)
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime='',
+            durationStr='1 Y',
+            barSizeSetting='1 day',
+            whatToShow='TRADES',
+            useRTH=True,
+            formatDate=1,
+        )
+        hist_df = ib_util.df(bars) if bars else None
+        if hist_df is not None and not hist_df.empty:
+            hist_df = hist_df[['date', 'close', 'volume']].rename(
+                columns={'date': 'Date', 'close': 'Close', 'volume': 'Volume'})
+
+        # Scadenze disponibili
+        params = ib.reqSecDefOptParams(
+            contract.symbol, '', contract.secType, contract.conId)
+        expirations = set()
+        for p in params:
+            for e in p.expirations:
+                if len(e) == 8:
+                    expirations.add(f'{e[:4]}-{e[4:6]}-{e[6:]}')
+
+        return {
+            'spot': spot,
+            'name': name,
+            'hist_df': hist_df,
+            'expirations': sorted(expirations),
+        }
+    except Exception:
+        return None
+    finally:
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
+
+
+def _ib_get_chain(ticker_sym, expiry_str, spot, port=7497, max_strikes=24):
+    """
+    Scarica catena opzioni da TWS per una scadenza (ATM ± max_strikes/2 strikes).
+    Ritorna {'calls': records, 'puts': records} o None.
+    Records identici a yfinance + _from_ibkr=True.
+    """
+    ib = _ib_connect(port)
+    if not ib:
+        return None
+    try:
+        stock = Stock(ticker_sym, 'SMART', 'USD')
+        ib.qualifyContracts(stock)
+        exp_ib = expiry_str.replace('-', '')  # YYYYMMDD
+
+        params = ib.reqSecDefOptParams(
+            stock.symbol, '', stock.secType, stock.conId)
+        all_strikes = set()
+        for p in params:
+            if exp_ib in p.expirations:
+                all_strikes.update(p.strikes)
+        if not all_strikes:
+            return None
+
+        # Limita agli strike ATM ± max_strikes//2
+        strikes_sorted = sorted(all_strikes)
+        atm_idx = int(np.argmin(np.abs(np.array(strikes_sorted) - spot)))
+        half = max_strikes // 2
+        lo = max(0, atm_idx - half)
+        hi = min(len(strikes_sorted), atm_idx + half + 1)
+        strikes_use = strikes_sorted[lo:hi]
+
+        # Batch: qualifica + reqMktData
+        pending_calls, pending_puts = [], []
+        for K in strikes_use:
+            for right, lst in (('C', pending_calls), ('P', pending_puts)):
+                opt = Option(ticker_sym, exp_ib, K, right, 'SMART', currency='USD')
+                try:
+                    [opt] = ib.qualifyContracts(opt)
+                    t = ib.reqMktData(opt, '106', False, False)
+                    lst.append((K, opt, t))
+                except Exception:
+                    pass
+
+        ib.sleep(2.5)  # aspetta i dati
+
+        def _extract(K, opt_contract, td):
+            mg   = getattr(td, 'modelGreeks', None)
+            iv   = float(mg.impliedVol) if (mg and mg.impliedVol and mg.impliedVol > 0) else 0.0
+            dlt  = float(mg.delta)      if (mg and mg.delta  is not None) else 0.0
+            gam  = float(mg.gamma)      if (mg and mg.gamma  is not None) else 0.0
+            the  = float(mg.theta)      if (mg and mg.theta  is not None) else 0.0
+            veg  = float(mg.vega)       if (mg and mg.vega   is not None) else 0.0
+            bid  = (float(td.bid)  if (getattr(td, 'bid',  None) and td.bid  > 0) else 0.0)
+            ask  = (float(td.ask)  if (getattr(td, 'ask',  None) and td.ask  > 0) else 0.0)
+            last = (float(td.last) if (getattr(td, 'last', None) and td.last > 0) else 0.0)
+            oi   = int(getattr(td, 'volume', 0) or 0)
+            try:
+                ib.cancelMktData(opt_contract)
+            except Exception:
+                pass
+            return {
+                'strike': float(K), 'bid': bid, 'ask': ask, 'lastPrice': last,
+                'impliedVolatility': iv, 'openInterest': oi,
+                '_delta': dlt, '_gamma': gam, '_theta': the, '_vega': veg,
+                '_from_ibkr': True,
+            }
+
+        calls = [_extract(K, c, t) for K, c, t in pending_calls]
+        puts  = [_extract(K, c, t) for K, c, t in pending_puts]
+        # Filtra righe senza dati utili
+        calls = [r for r in calls if r['impliedVolatility'] > 0 or r['bid'] > 0]
+        puts  = [r for r in puts  if r['impliedVolatility'] > 0 or r['bid'] > 0]
+        return {'calls': calls, 'puts': puts}
+
+    except Exception:
+        return None
+    finally:
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
+
+
 _sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _sys_path not in sys.path:
     sys.path.insert(0, _sys_path)
@@ -661,6 +835,7 @@ app.layout = html.Div([
     dcc.Store(id='opt-legs-store', data=[]),
     dcc.Store(id='opt-rf-store',   data=3.5),
     dcc.Store(id='opt-expiry-store'),
+    dcc.Store(id='opt-ibkr-port-store', data=7497),
 
     html.Div([
 
@@ -692,6 +867,26 @@ app.layout = html.Div([
             ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px',
                       'flexWrap': 'wrap'}),
             html.Div([
+                # Fonte dati badge
+                html.Div(id='opt-source-badge', style={'marginRight': '10px'}),
+                # Selettore porta TWS (visibile solo se ib_insync installato)
+                *([
+                    html.Div([
+                        _lbl('TWS:'),
+                        dcc.RadioItems(
+                            id='opt-ibkr-port-select',
+                            options=[
+                                {'label': 'Paper 7497', 'value': 7497},
+                                {'label': 'Live 7496',  'value': 7496},
+                            ],
+                            value=7497, inline=True,
+                            inputStyle={'marginRight': '3px'},
+                            labelStyle={'marginRight': '10px', 'fontSize': '10px',
+                                        'cursor': 'pointer'},
+                        ),
+                    ], style={'display': 'flex', 'alignItems': 'center', 'gap': '4px',
+                              'marginRight': '10px'}),
+                ] if _IB_AVAILABLE else []),
                 _lbl('Risk-Free %:'),
                 dcc.Input(id='opt-rf-input', type='number', value=3.5,
                           min=0, max=20, step=0.1, debounce=True,
@@ -906,20 +1101,82 @@ app.layout = html.Div([
 # SEZIONE 6 — CALLBACKS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ─── CB 0: Relay IBKR port ───────────────────────────────────────────────────
+if _IB_AVAILABLE:
+    @app.callback(
+        Output('opt-ibkr-port-store', 'data'),
+        Input('opt-ibkr-port-select', 'value'),
+        prevent_initial_call=True,
+    )
+    def relay_ibkr_port(v):
+        return int(v or 7497)
+
+
 # ─── CB 1: Fetch ticker ───────────────────────────────────────────────────────
 @app.callback(
     Output('opt-stock-store', 'data'),
     Output('opt-stock-info', 'children'),
     Output('opt-expiry-select', 'options'),
     Output('opt-hist-store', 'data'),
+    Output('opt-source-badge', 'children'),
     Input('opt-search-btn', 'n_clicks'),
     State('opt-ticker-input', 'value'),
+    State('opt-ibkr-port-store', 'data'),
     prevent_initial_call=True,
 )
-def fetch_ticker(_, ticker_raw):
+def fetch_ticker(_, ticker_raw, ibkr_port):
     ticker = (ticker_raw or '').strip().upper()
     if not ticker:
         raise PreventUpdate
+
+    def _badge(source):
+        if source == 'ibkr':
+            return html.Span('🟢 IBKR Live', style={
+                'background': '#e8f5e9', 'color': '#1b5e20',
+                'borderRadius': '4px', 'padding': '3px 8px',
+                'fontSize': '10px', 'fontWeight': '700',
+                'fontFamily': 'Inter,sans-serif', 'border': '1px solid #a5d6a7',
+            })
+        return html.Span('🟡 yfinance', style={
+            'background': '#fff8e1', 'color': '#f57f17',
+            'borderRadius': '4px', 'padding': '3px 8px',
+            'fontSize': '10px', 'fontWeight': '700',
+            'fontFamily': 'Inter,sans-serif', 'border': '1px solid #ffe082',
+        })
+
+    def chip(txt, bg='#e8f0fb', col='#1a3a6b'):
+        return html.Span(txt, style={
+            'background': bg, 'color': col, 'borderRadius': '4px',
+            'padding': '3px 8px', 'fontSize': '11px', 'fontWeight': '600',
+            'fontFamily': 'Inter,sans-serif',
+        })
+
+    # ── Prova IBKR prima ─────────────────────────────────────────────────────
+    ibkr_port = int(ibkr_port or 7497)
+    ib_data = _ib_get_spot_hist_exps(ticker, ibkr_port)
+
+    if ib_data:
+        spot        = ib_data['spot']
+        name        = ib_data['name']
+        expirations = ib_data['expirations']
+        hist_df     = ib_data['hist_df']
+
+        hist_json = None
+        if hist_df is not None and not hist_df.empty:
+            hist_json = hist_df.to_json(orient='records', date_format='iso')
+
+        exp_options = [{'label': e, 'value': e} for e in expirations[:20]]
+        chips = [chip(name), chip(f'${spot:.2f}', '#f0f4fa')]
+        if expirations:
+            chips.append(chip(f'{len(expirations)} scadenze', '#fff3e0', '#e65100'))
+
+        stock_data = {
+            'ticker': ticker, 'spot': spot, 'name': name,
+            'source': 'ibkr', 'ibkr_port': ibkr_port,
+        }
+        return stock_data, chips, exp_options, hist_json, _badge('ibkr')
+
+    # ── Fallback yfinance ─────────────────────────────────────────────────────
     try:
         t    = yf.Ticker(ticker)
         info = t.info or {}
@@ -930,23 +1187,13 @@ def fetch_ticker(_, ticker_raw):
         spot = float(spot)
         name = info.get('shortName') or info.get('longName') or ticker
 
-        # Prezzi storici 1 anno
         hist = t.history(period='1y')
         hist_json = hist[['Close', 'Volume']].reset_index().rename(
             columns={'Date': 'date', 'Close': 'Close', 'Volume': 'Volume'}
         ).to_json(orient='records', date_format='iso')
 
-        # Scadenze disponibili
         expirations = t.options or []
         exp_options = [{'label': e, 'value': e} for e in expirations[:20]]
-
-        # Chip info
-        def chip(txt, bg='#e8f0fb', col='#1a3a6b'):
-            return html.Span(txt, style={
-                'background': bg, 'color': col, 'borderRadius': '4px',
-                'padding': '3px 8px', 'fontSize': '11px', 'fontWeight': '600',
-                'fontFamily': 'Inter,sans-serif',
-            })
 
         prev_close = float(info.get('previousClose') or spot)
         chg_pct    = (spot / prev_close - 1) * 100 if prev_close else 0
@@ -966,14 +1213,12 @@ def fetch_ticker(_, ticker_raw):
         if expirations:
             chips.append(chip(f'{len(expirations)} scadenze', '#fff3e0', '#e65100'))
 
-        stock_data = {
-            'ticker': ticker, 'spot': spot, 'name': name,
-        }
-        return stock_data, chips, exp_options, hist_json
+        stock_data = {'ticker': ticker, 'spot': spot, 'name': name, 'source': 'yfinance'}
+        return stock_data, chips, exp_options, hist_json, _badge('yfinance')
 
     except Exception as e:
         err = html.Span(f'Errore: {e}', style={'color': '#c0392b', 'fontSize': '11px'})
-        return None, [err], [], None
+        return None, [err], [], None, html.Div()
 
 
 # ─── CB 2: Fetch chain per scadenza ──────────────────────────────────────────
@@ -987,11 +1232,21 @@ def fetch_ticker(_, ticker_raw):
 def fetch_chain(expiry, stock_data):
     if not expiry or not stock_data:
         raise PreventUpdate
+    ticker = stock_data['ticker']
+    spot   = float(stock_data.get('spot', 100))
+
+    # ── Prova IBKR se il ticker è stato caricato da IBKR ────────────────────
+    if stock_data.get('source') == 'ibkr':
+        port     = int(stock_data.get('ibkr_port', 7497))
+        ib_chain = _ib_get_chain(ticker, expiry, spot, port)
+        if ib_chain and (ib_chain['calls'] or ib_chain['puts']):
+            return ib_chain, expiry
+
+    # ── Fallback yfinance ────────────────────────────────────────────────────
     try:
-        ticker = stock_data['ticker']
-        chain  = yf.Ticker(ticker).option_chain(expiry)
-        calls  = chain.calls.to_dict(orient='records')
-        puts   = chain.puts.to_dict(orient='records')
+        chain = yf.Ticker(ticker).option_chain(expiry)
+        calls = chain.calls.to_dict(orient='records')
+        puts  = chain.puts.to_dict(orient='records')
         return {'calls': calls, 'puts': puts}, expiry
     except Exception:
         raise PreventUpdate
