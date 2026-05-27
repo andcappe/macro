@@ -13,5 +13,3 @@ apscheduler>=3.10.0
 werkzeug>=3.0.0
 statsmodels>=0.14.0
 arch>=6.0.0
-ib_insync>=0.9.86
-nest_asyncio>=1.6.0
