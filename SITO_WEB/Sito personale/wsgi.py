@@ -43,7 +43,9 @@ rendimenti_srv  = _load("_app_rendimenti",  "rendimenti")
 try:
     opzioni_srv = _load("_app_opzioni", "opzioni")
 except Exception as _e:
-    print(f"[WARN] opzioni non caricata: {_e}", flush=True)
+    import traceback as _tb
+    print(f"[ERROR] opzioni non caricata: {_e}", flush=True)
+    _tb.print_exc()
     opzioni_srv = None
 
 # ─── Autenticazione ───────────────────────────────────────────────────────────
