@@ -710,6 +710,8 @@ def _get_returns(data_json):
     if key not in _DF_CACHE:
         df = pd.read_json(io.StringIO(data_json), orient='split')
         df.index = pd.to_datetime(df.index)
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
         _DF_CACHE[key] = df
     return _DF_CACHE[key].copy()
 
@@ -769,6 +771,8 @@ def _build_perf_chart(prices_data, chart_assets, frontier_weights, show_frontier
     try:
         prices_df = pd.read_json(io.StringIO(prices_data), orient='split')
         prices_df.index = pd.to_datetime(prices_df.index)
+        if hasattr(prices_df.index, 'tz') and prices_df.index.tz is not None:
+            prices_df.index = prices_df.index.tz_localize(None)
         if date_start: prices_df = prices_df.loc[date_start:]
         if date_end:   prices_df = prices_df.loc[:date_end]
         fig2 = go.Figure()
@@ -844,6 +848,8 @@ def _build_drawdown_chart(prices_data, chart_assets, frontier_weights, show_fron
     try:
         prices_df = pd.read_json(io.StringIO(prices_data), orient='split')
         prices_df.index = pd.to_datetime(prices_df.index)
+        if hasattr(prices_df.index, 'tz') and prices_df.index.tz is not None:
+            prices_df.index = prices_df.index.tz_localize(None)
         if date_start: prices_df = prices_df.loc[date_start:]
         if date_end:   prices_df = prices_df.loc[:date_end]
         fig_dd = go.Figure()
@@ -1256,11 +1262,11 @@ def _build_grid_rows(returns_df, pre_select=None, pre_weights=None):
     Output('fe-grid',        'children', allow_duplicate=True),
     Output('fe-asset-count', 'children', allow_duplicate=True),
     Input('fe-loaded-flag',  'data'),
-    State('fe-stock-data',   'data'),
+    Input('fe-stock-data',   'data'),
     prevent_initial_call=True,
 )
 def build_grid_on_load(loaded, stock_data):
-    if not loaded or not stock_data:
+    if not stock_data:
         raise PreventUpdate
     returns_df = _get_returns(stock_data)
     if returns_df is None or returns_df.empty:
@@ -2409,10 +2415,11 @@ def fe_live_sync(_, sig):
     op, cr = _reconstruct_from_json_fe(ns)
     if op is None or cr is None:
         raise PreventUpdate
+    n = len(op.columns)
     return (
         cr.to_json(orient='split', date_format='iso'),
         op.to_json(orient='split', date_format='iso'),
-        True, '', 'default', new_sig,
+        True, f'👤 Personale ({n} asset)', 'default', new_sig,
     )
 
 
