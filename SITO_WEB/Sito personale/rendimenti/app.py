@@ -4,12 +4,12 @@ Analisi dei rendimenti per periodo: YTD, annuali, T-N, Information Ratio, Sharpe
 Legge i dati direttamente dal portafoglio condiviso (market_data.pkl / buffer live).
 """
 
+import io
 import json
 import pickle
 import sys
 import os
 import traceback
-from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -42,20 +42,11 @@ _PORT_PKL = os.path.normpath(os.path.join(
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 _NU = no_update
 
-def _to_json(df):
-    if df is None:
-        return None
-    if hasattr(df.index, 'tz') and df.index.tz is not None:
-        df = df.copy()
-        df.index = df.index.tz_localize(None)
-    return df.to_json(date_format='iso', orient='split')
-
 def _get_df(js):
     if not js:
         return None
-    df = pd.read_json(StringIO(js), orient='split')
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index)
+    df = pd.read_json(io.StringIO(js), orient='split')
+    df.index = pd.to_datetime(df.index)
     if hasattr(df.index, 'tz') and df.index.tz is not None:
         df.index = df.index.tz_localize(None)
     return df
@@ -469,7 +460,9 @@ def load_default_data(_):
         ' — seleziona asset/portafogli e clicca Aggiorna Tabella',
         style={'color': '#888'},
     ))
-    return _to_json(prices), _to_json(returns), html.Span(info_parts), p1, p2, p3
+    return (prices.to_json(orient='split', date_format='iso'),
+            returns.to_json(orient='split', date_format='iso'),
+            html.Span(info_parts), p1, p2, p3)
 
 
 # ─── Callback 2: Costruisce la griglia asset ──────────────────────────────────
@@ -1211,4 +1204,6 @@ def rend_live_sync(_, sig):
                                           'marginRight': '8px'}),
         f'{n} asset',
     ])
-    return _to_json(op), _to_json(cr), label, new_sig
+    return (op.to_json(orient='split', date_format='iso'),
+            cr.to_json(orient='split', date_format='iso'),
+            label, new_sig)
