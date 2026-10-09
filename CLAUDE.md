@@ -221,12 +221,25 @@ Homepage text lives in `profilo/index.html`; dashboard logic lives in each `<das
 - Dash callbacks: identify the trigger with `ctx.triggered_id`, **not** by splitting `prop_id` — the
   `split('.')` form broke the File buttons once and was fixed for that reason.
 
-## Stato dei lavori (aggiornato 09/10/2026)
+## Stato dei lavori (aggiornato 09/10/2026, sera)
 
 Riepilogo di cosa è stato fatto, cosa è ancora aperto e quali trappole sono già costate tempo.
 Da rileggere all'inizio di ogni sessione e da aggiornare alla fine, con la data.
 
 ### Fatto di recente
+- **09/10/2026 — pubblicati i due fix, e `doctl` finalmente autenticato: il job notturno su R2 funziona.**
+  Pushati `8493666` + `c6f5b18` (deploy `cdb41852`, ACTIVE 6/6, 07:18 UTC). `doctl auth init` era bloccato
+  da un problema che non c'entrava niente con DO: `~/Library/Application Support` era di **root**, perché
+  l'installazione di EaseUS Data Recovery (03/02/2026) si era presa la proprietà della cartella *sopra* la
+  propria — 277 sottocartelle su 278 erano regolarmente dell'utente. Risolto con
+  `sudo chown macbookpro:staff "~/Library/Application Support"` (senza `-R`). L'app su DO è
+  `sea-turtle-app`, id `2dce38e0-3ce1-48db-bf92-db6430e375da`.
+  **Il log di boot ha smontato il problema aperto n.1**: `✓ [cloud] sincronizzati 212 file dal bucket
+  'dashboard-dati'` → `✓ Dati ETF caricati da disco — 08/10/2026 22:00`, cioè le 00:00 di Roma, lo slot
+  del job ETF; e tutti e quattro i dataset passano `_dataset_da_rifare`, che restituisce False **solo** se
+  l'ultimo prezzo è entro 5 giorni e nessun ticker di `Files/` manca. Quindi il bucket contiene dati di
+  stanotte: il job scarica, salva e carica su R2. Anche `✓ [dati utenti] tutti aggiornati` e
+  `[macro-cache] presente e completa (43 dataset, ~107h fa)`.
 - **08/10/2026 — il fix del file cliente provato in un boot vero, e tre difetti nei dati del cliente.**
   Sito avviato in locale (`127.0.0.1:8080`, R2 spento) per vedere il fix nel browser: nove dashboard su
   nove rispondono (`302` = redirect al login). Il boot ha confermato da sé anche `8493666`:
@@ -267,14 +280,19 @@ Da rileggere all'inizio di ogni sessione e da aggiornare alla fine, con la data.
   21/09 a 05/10.
 
 ### Aperto
-1. **Perché il job notturno non scrive su R2 dal 21/09/2026 08:39.** Non è un deploy mancante: il fix dei
-   job per dataset *è* in produzione (verificato con `git merge-base --is-ancestor`) e `_do_download`
-   passa da `_atomic_pkl_write` → `_cloud_push`, quindi il percorso di scrittura è collegato. Entrambe le
-   ipotesi principali sono già cadute. Ipotesi aperta: `gunicorn.conf.py` ha `workers = 1`, `threads = 4`,
-   `timeout = 120` e il worker potrebbe essere ucciso durante un download lungo, prima del salvataggio.
-   Serve il log di runtime: l'utente deve lanciare `doctl auth init` (doctl è installato in
-   `/usr/local/bin/doctl` ma non autenticato — il token lo inserisce lui, mai passarlo a Claude), poi
-   `doctl apps logs --type run`. Il commit `8493666` è una **rete di sicurezza**, non la cura.
+1. **Quando ha ripreso a scrivere su R2, e perché si era fermato.** La domanda «perché non scrive dal
+   21/09/2026 08:39» **non vale più**: il 09/10 il bucket conteneva dati di stanotte (vedi sopra). Il
+   merito non è dei nostri commit — `8493666` è andato in produzione alle 07:18 del 09/10, *dopo* il job
+   che ha prodotto quei dati — quindi fra il 05/10 e il 08/10 la cosa si è sistemata da sé, o la misura
+   di allora guardava l'oggetto sbagliato. Non è ricostruibile: `doctl apps logs` **rifiuta** i log di un
+   deploy superato (`cannot get running logs ... in phase final_cleanup`), e DO non ne conserva lo storico
+   senza log forwarding. Verifica possibile e decisiva: finché il deploy `cdb41852` resta attivo, i job di
+   stanotte (00:00–02:30 Roma = **22:00–00:30 UTC**) finiscono nel suo log, quindi
+   `doctl apps logs 2dce38e0-3ce1-48db-bf92-db6430e375da --type run --tail 2000` la mattina dopo li mostra
+   davvero, invece di farli dedurre dai timestamp. Ipotesi mai esclusa, se ricapita: `gunicorn.conf.py` ha
+   `workers = 1`, `threads = 4`, `timeout = 120`, e il worker può essere ucciso durante un download lungo
+   prima del salvataggio — si vedrebbe come `WORKER TIMEOUT` + `SIGKILL` senza la riga
+   `✓ market_data.pkl salvato`.
 2. **Asimmetria "scarta / non scartare mai".** Sui dataset condivisi `_do_download` butta gli asset che
    Yahoo non restituisce; sui dati utente la regola è l'opposto (mai scartare, vedi lo Scheduler sopra).
    Il 05/10 sono caduti `HO=F` (future scaduto), `LBS=F` (delistato), `TRX-USD` e `WETH-USD`, registrati
