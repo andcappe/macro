@@ -252,7 +252,7 @@ Da rileggere all'inizio di ogni sessione e da aggiornare alla fine, con la data.
   22/04/2025 e GOLD dal 30/11/2020 — su una finestra di 10 anni gli anni mancanti contano come 0%
   piatto (vedi aperto 6) e il rendimento storico del portafoglio risulta **sottostimato senza errori a
   schermo**. Rimedio: accorciare la finestra o usare `SWDA.MI` (già nel file, storia dal 2016).
-- **07/10/2026 — commit `c6f5b18`, NON pushato: il file cliente restava invisibile.** Caricando un xlsx
+- **07/10/2026 — commit `c6f5b18` (pushato il 09/10): il file cliente restava invisibile.** Caricando un xlsx
   con titoli e pesi, il download finiva (9 s, tutto corretto) ma la pagina restava vuota e sembrava un
   blocco. Causa: `_do_download_client_impl` riscrive `current.json` con `_write_user_json(reset_state=True)`,
   che azzera `checked`, e subito dopo impostava **solo** i pesi P1 — nessuno rimetteva la spunta, e tutto
@@ -268,7 +268,7 @@ Da rileggere all'inizio di ogni sessione e da aggiornare alla fine, con la data.
   (giorni=5)`, che riallinea da solo i dati personali (il vecchio bug "dati fermi a luglio").
 - **02/10/2026 — `IWMO.MI`** (World Momentum Factor) aggiunto a `Files/ETF.xlsx`: 41 → 42 ticker, valuta
   letta come `ERR` e corretta in EUR. Commit `548a180`.
-- **05/10/2026 — commit `8493666`, al momento NON pushato.** Il prewarm al boot controllava soltanto
+- **05/10/2026 — commit `8493666` (pushato il 09/10).** Il prewarm al boot controllava soltanto
   `Path(cache_pkl).exists()`: una cache vecchia restava vecchia per sempre e nessun deploy la rimetteva
   in pari (quattro deploy il 03/10 hanno lasciato il sito al 21/09). Ora `_dataset_da_rifare(filename,
   cache_pkl)` guarda **età** (`_DATASET_GIORNI_VECCHIO = 5`, assorbe weekend e festivi) e **completezza**
@@ -306,11 +306,7 @@ Da rileggere all'inizio di ogni sessione e da aggiornare alla fine, con la data.
    dentro; la card in home si chiama ancora «Fondi Pensione» (`profilo/index.html:829` e
    `portafoglio/profilo.html:829`) e l'URL resta `/fondipensione/` anche se il tab in navbar ora dice
    «Clienti». L'utente ha detto «POI LA MODIFICHEREMO»: non toccarlo senza che lo chieda.
-
-5. **I due commit `8493666` e `c6f5b18` non sono ancora pushati** (`main` è 2 avanti su `origin`): né il
-   riscarico al boot né la selezione degli asset del file cliente sono in produzione. Si pubblica solo
-   quando l'utente lo chiede.
-6. **`.fillna(0)` sui rendimenti maschera le storie corte.** `_buyhold_cum` (`portafoglio/app.py:340`) e
+5. **`.fillna(0)` sui rendimenti maschera le storie corte.** `_buyhold_cum` (`portafoglio/app.py:340`) e
    `_rebalanced_cum` (`:363`) riempiono a zero i giorni in cui un asset non esisteva ancora: nessun
    avviso a schermo, e la curva del portafoglio sottostima quanto più pesa un asset giovane. Decisione
    non presa: avvisare quando un asset selezionato copre meno della finestra richiesta, oppure far
